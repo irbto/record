@@ -1,0 +1,8 @@
+/target/
+/benchmarks/results/
+*.mp3
+*.wav
+*.pdb
+.DS_Store
+.idea/
+.vscode/

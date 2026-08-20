@@ -1,0 +1,55 @@
+[package]
+name = "record-tui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "One-command Windows system-audio recording with a live terminal waveform"
+repository = "https://github.com/irbto/record"
+homepage = "https://github.com/irbto/record"
+license = "MIT"
+keywords = ["audio", "recording", "terminal", "wasapi", "mp3"]
+categories = ["command-line-utilities", "multimedia::audio"]
+readme = "README.md"
+
+[[bin]]
+name = "record"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive", "wrap_help"] }
+crossbeam-channel = "0.5.16"
+crossterm = "0.29.0"
+ctrlc = "3.5.2"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
+rustfft = "6.4.1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_MediaFoundation",
+    "Win32_Media_Multimedia",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+] }
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

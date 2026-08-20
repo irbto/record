@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Test
+        run: cargo test --locked --all-targets
+      - name: Validate PowerShell scripts
+        shell: pwsh
+        run: |
+          $errors = @()
+          [Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$null, [ref]$errors) | Out-Null
+          [Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/benchmark-startup.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors.Count) { throw ($errors | Out-String) }
+      - name: Release build
+        run: cargo build --locked --release
+
+  msrv:
+    name: Rust 1.88
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install MSRV
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Check minimum supported Rust
+        run: cargo +1.88.0 check --locked --all-targets
+
+  portable-core:
+    name: Portable core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Check non-Windows fallback
+        run: cargo check --locked --all-targets

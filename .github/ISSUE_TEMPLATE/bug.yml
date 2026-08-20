@@ -1,0 +1,39 @@
+name: Bug report
+description: Report a reproducible capture, encoding, or terminal problem
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Please avoid attaching recordings that contain private audio.
+  - type: input
+    id: version
+    attributes:
+      label: record version
+      placeholder: Output of record --version
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: record doctor output
+      render: text

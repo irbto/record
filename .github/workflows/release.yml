@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Test
+        run: cargo test --locked --all-targets
+      - name: Build
+        run: cargo build --locked --release
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "record-x86_64-pc-windows-msvc"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item target/release/record.exe, README.md, LICENSE "dist/$name"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$name.zip").Hash.ToLowerInvariant()
+          "$hash  $name.zip" | Set-Content -NoNewline "dist/$name.zip.sha256"
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $name = "record-x86_64-pc-windows-msvc"
+          gh release create $env:GITHUB_REF_NAME "dist/$name.zip" "dist/$name.zip.sha256" --generate-notes --verify-tag
