@@ -334,7 +334,7 @@ impl App {
             })
             .collect::<Vec<_>>();
         let spectrum = Sparkline::default()
-            .block(panel(" SPECTRUM · 20 Hz — 24 kHz ", PURPLE))
+            .block(panel(" SPECTRUM · 20 Hz to 24 kHz ", PURPLE))
             .data(&data)
             .max(100)
             .style(Style::default().fg(PURPLE))
@@ -377,7 +377,7 @@ impl App {
 
     fn render_help(&self, frame: &mut Frame, area: Rect) {
         let help = Paragraph::new(vec![
-            TextLine::from("record starts capturing immediately—there is no arm screen."),
+            TextLine::from("record starts audio capture immediately. No menu is necessary."),
             TextLine::from(""),
             help_line("Ctrl+C / S / Q / Esc", "finalize the MP3 and exit"),
             help_line("Space", "pause or resume (paused time is omitted)"),

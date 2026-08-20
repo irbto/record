@@ -21,6 +21,16 @@ jobs:
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
       - name: Format
         run: cargo fmt --all -- --check
+      - name: Check project text punctuation
+        shell: pwsh
+        run: |
+          $textFiles = @(git ls-files "*.md" "*.yml" "*.yaml" "*.rs" "*.ps1" "*.toml")
+          $emDash = [string][char]0x2014
+          $matches = @(Select-String -LiteralPath $textFiles -SimpleMatch $emDash)
+          if ($matches.Count) {
+            $matches | ForEach-Object { Write-Error $_.ToString() }
+            throw "Documentation must not contain em dashes."
+          }
       - name: Lint
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Test

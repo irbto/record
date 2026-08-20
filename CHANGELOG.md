@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to this project will be documented here. The project follows [Semantic Versioning](https://semver.org/).
+This file gives the important project changes. The project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
@@ -8,11 +8,13 @@ All notable changes to this project will be documented here. The project follows
 
 ### Added
 
-- Immediate, no-menu system-audio capture from the default Windows output.
-- Native WASAPI loopback input and Media Foundation MP3 encoding.
-- 128, 192, 256, and 320 kbps stereo output profiles.
-- Ratatui waveform, level meter, spectrum, split view, pause, and help controls.
-- Headless mode, timed recordings, overwrite protection, and `doctor` diagnostics.
-- Startup benchmark and Windows release automation.
-- Standalone Windows executable, verified one-line installer, and persistent user `PATH` setup.
-- Clickable OSC 8 file link for the finalized MP3 in supported terminals.
+- `record` starts system audio capture without a source menu.
+- WASAPI supplies loopback audio. Media Foundation writes the MP3.
+- The output profiles are 128, 192, 256, and 320 kbps stereo.
+- Ratatui shows waveforms, level meters, a spectrum, and a split view.
+- The TUI has pause and help controls.
+- The CLI has headless operation, timed capture, file protection, and `doctor` checks.
+- The project has a startup benchmark and Windows release automation.
+- The release has a standalone executable and a one-command installer.
+- The installer adds its directory to the current shell and the persistent user `PATH`.
+- Supported terminals show a clickable link for the saved MP3.

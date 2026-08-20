@@ -1,25 +1,36 @@
-# Startup benchmarks
+# Startup benchmark
 
-Startup is a product feature. `scripts/benchmark-startup.ps1` tracks two deliberately small metrics:
+Audio capture ready is the primary startup metric. It measures the time until `record` is recording system audio.
 
-- **CLI process** is wall time for `record --version`, including Windows process creation and PowerShell measurement overhead.
-- **WASAPI capture ready** is measured inside `record`, from the first instruction in `main` until the loopback client has started and the native MP3 sink is ready.
+The measurement starts at the first instruction in `main`. It stops after these actions are complete:
 
-The optional `-Enforce` switch applies generous regression budgets of 50 ms and 100 ms respectively. Those budgets are local gates rather than hosted-CI gates because shared runners do not provide stable timing or a guaranteed playback endpoint.
+1. The MP3 writer opens.
+2. The WASAPI loopback client starts.
+3. The audio worker sends `AudioEvent::Started`.
+
+The TUI changes from `STARTING` to `RECORDING` at this boundary.
+
+The CLI process metric measures `record --version`. This metric includes Windows process creation and PowerShell measurement time.
 
 ## Reference result
 
-Measured on 2026-08-20 with a release build, 3 warmups, and 30 runs:
+The test used a release build, 3 warmup runs, and 30 measured runs. The test date was 2026-08-20.
 
-| Environment | Metric | Median | Minimum |
-|---|---|---:|---:|
-| Windows 11 Pro N build 26200, Ryzen 5 5600X | CLI process | 11.22 ms | 10.32 ms |
-| Windows 11 Pro N build 26200, Ryzen 5 5600X | WASAPI capture ready | 23.89 ms | 22.87 ms |
+| Environment | Metric | Median | Minimum | Budget |
+|---|---|---:|---:|---:|
+| Windows 11 Pro N build 26200, Ryzen 5 5600X | Audio capture ready | 23.89 ms | 22.87 ms | 100 ms |
+| Windows 11 Pro N build 26200, Ryzen 5 5600X | CLI process | 11.22 ms | 10.32 ms | 50 ms |
 
-The stripped release executable was 2,221,568 bytes (2.12 MiB). Treat these numbers as a comparison point for this machine, not a universal guarantee.
+The release executable was 2,221,568 bytes (2.12 MiB). These results apply to the reference computer. Results on other computers can be different.
 
-Run the same gate locally:
+## Run the benchmark
+
+Use this command:
 
 ```powershell
 .\scripts\benchmark-startup.ps1 -Runs 30 -Enforce
 ```
+
+The `-Enforce` option applies the two budgets in the table. Run this test on a local computer with a playback endpoint.
+
+Do not use a shared CI runner for startup limits. Runner load is not stable, and a playback endpoint is not always available.

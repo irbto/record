@@ -5,12 +5,12 @@ labels: [bug]
 body:
   - type: markdown
     attributes:
-      value: Please avoid attaching recordings that contain private audio.
+      value: Do not attach a recording that contains private audio.
   - type: input
     id: version
     attributes:
       label: record version
-      placeholder: Output of record --version
+      placeholder: Paste the output from record --version
     validations:
       required: true
   - type: input
@@ -23,17 +23,24 @@ body:
   - type: textarea
     id: reproduce
     attributes:
-      label: Reproduction steps
+      label: Steps to reproduce the problem
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
-      label: Expected and actual behavior
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
     validations:
       required: true
   - type: textarea
     id: doctor
     attributes:
-      label: record doctor output
+      label: System check output
+      description: Paste the output from record doctor
       render: text

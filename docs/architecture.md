@@ -1,6 +1,6 @@
 # Architecture
 
-`record` keeps the capture path native and isolates it from terminal work.
+`record` uses native Windows audio components. Audio capture and terminal rendering use separate paths.
 
 ```text
 default Windows playback endpoint
@@ -23,27 +23,49 @@ Media Foundation MP3    bounded try-send
 
 ## Capture thread
 
-The worker initializes multithreaded COM, Media Foundation, the default `eRender` / `eConsole` endpoint, and an event-driven WASAPI loopback client. It joins Windows' `Audio` MMCSS class while capturing.
+The worker initializes COM and Media Foundation. It opens the default `eRender` and `eConsole` endpoint.
 
-WASAPI supplies the endpoint mix format. The converter supports PCM and IEEE float wave formats, including `WAVEFORMATEXTENSIBLE`, and performs speaker-aware stereo downmixing. A small stateful linear resampler converts to the nearest supported MP3 rate, normally 48 kHz or 44.1 kHz.
+The worker opens the MP3 writer. It then configures and starts an event-driven WASAPI loopback client.
 
-Media Foundation selects the highest available stereo MP3 profile at or below the requested bitrate. PCM samples are timestamped on a contiguous encoded timeline and sent to `IMFSinkWriter`.
+After `IAudioClient::Start` succeeds, the worker sends `AudioEvent::Started`. This event changes the TUI state from `STARTING` to `RECORDING`.
+
+The worker joins the Windows `Audio` MMCSS class during capture.
+
+WASAPI supplies the endpoint mix format. The converter accepts PCM and IEEE float formats. It also accepts `WAVEFORMATEXTENSIBLE`.
+
+The converter uses speaker positions to make stereo audio. A stateful linear resampler selects a supported MP3 rate.
+
+The usual output rate is 48 kHz or 44.1 kHz. Media Foundation selects the highest available stereo profile at the requested bitrate or less.
+
+The writer gives each PCM block a contiguous timestamp. It sends each block to `IMFSinkWriter`.
 
 ## UI isolation
 
-Visualization blocks travel over a bounded channel with `try_send`. If a terminal cannot keep up, UI frames are dropped while audio encoding continues. Start and finalize state messages use the same channel, but never compete with an unbounded visualization backlog.
+Visualization blocks move through a bounded channel with `try_send`. If the channel is full, the worker discards a visualization block. Audio encoding continues.
 
-The default waveform is incremental. The RustFFT planner and spectrum buffers are created only after the user presses `W`. Pausing stops samples from entering the encoded timeline, so the output has no silent pause gap.
+Start and finalize messages use the same channel. The channel cannot make an unlimited backlog.
+
+The waveform history grows as necessary. The program creates the RustFFT planner and spectrum buffers only after you select a spectrum view.
+
+Pause stops new samples from entering the encoded timeline. Thus, the MP3 does not contain a silent pause gap.
 
 ## Startup sequence
 
-1. The bare no-argument path constructs defaults without invoking Clap.
-2. The output path and Ctrl+C handler are prepared.
-3. The audio worker starts and opens WASAPI plus the encoder.
-4. Only then does the main thread mount Ratatui.
+1. The no-argument path makes the default configuration without Clap.
+2. The main thread prepares the output path and the `Ctrl+C` handler.
+3. The main thread starts the audio worker before it starts Ratatui.
+4. The worker opens the MP3 writer and starts the WASAPI client.
+5. The worker sends `AudioEvent::Started`.
+6. The TUI changes from `STARTING` to `RECORDING`.
 
-`scripts/benchmark-startup.ps1` measures normal CLI process time and an internal timestamp at the `AudioEvent::Started` boundary. The latter is the useful product metric: time from process entry until WASAPI is actively capturing.
+`scripts/benchmark-startup.ps1` measures the `AudioEvent::Started` boundary. This is the primary product metric because WASAPI capture is active at this boundary.
+
+The script also measures the process time for `record --version`.
 
 ## Failure and file semantics
 
-Existing files are protected unless `--force` is explicit. The sink writer is finalized before a successful exit. If capture or encoding fails, the partially written destination is removed. RAII guards stop the audio client, leave MMCSS, shut down Media Foundation, uninitialize COM, and restore terminal state.
+`record` does not replace an existing file unless you use `--force`. The sink writer finalizes the MP3 before a successful exit.
+
+If capture or encoding fails, `record` removes the incomplete file. RAII guards stop the audio client and leave MMCSS.
+
+Other guards stop Media Foundation, uninitialize COM, and restore the terminal state.
