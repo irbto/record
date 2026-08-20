@@ -26,9 +26,12 @@ jobs:
         run: |
           $name = "record-x86_64-pc-windows-msvc"
           New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item target/release/record.exe "dist/record.exe"
           Copy-Item target/release/record.exe, README.md, LICENSE "dist/$name"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+          $exeHash = (Get-FileHash -Algorithm SHA256 "dist/record.exe").Hash.ToLowerInvariant()
           $hash = (Get-FileHash -Algorithm SHA256 "dist/$name.zip").Hash.ToLowerInvariant()
+          "$exeHash  record.exe" | Set-Content -NoNewline "dist/record.exe.sha256"
           "$hash  $name.zip" | Set-Content -NoNewline "dist/$name.zip.sha256"
       - name: Publish GitHub release
         shell: pwsh
@@ -36,4 +39,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $name = "record-x86_64-pc-windows-msvc"
-          gh release create $env:GITHUB_REF_NAME "dist/$name.zip" "dist/$name.zip.sha256" --generate-notes --verify-tag
+          gh release create $env:GITHUB_REF_NAME "dist/record.exe" "dist/record.exe.sha256" "dist/$name.zip" "dist/$name.zip.sha256" --generate-notes --verify-tag

@@ -37,28 +37,33 @@ The default path has no menu and no mandatory configuration. Capture begins befo
 - Encodes directly to stereo MP3 with Windows Media Foundation; 320 kbps is the default.
 - Shows live left/right braille waveforms, level meters, a lazy-loaded spectrum, and a split view.
 - Starts recording immediately and always finalizes cleanly on `Ctrl+C`, `S`, `Q`, or `Esc`.
+- Prints the saved MP3 as a clickable file link in terminals that support OSC 8 hyperlinks.
 - Supports pause/resume, automatic stop durations, explicit output paths, and headless scripts.
 - Ships as one native executable with no FFmpeg, Node.js, WebView, or runtime service.
 
 ## Install
 
-With a Rust toolchain:
-
-```powershell
-cargo install --git https://github.com/irbto/record --locked
-```
-
-Prebuilt releases can be installed with PowerShell:
+Recommended—one PowerShell command, with no Rust or FFmpeg required:
 
 ```powershell
 irm https://raw.githubusercontent.com/irbto/record/main/install.ps1 | iex
 ```
 
-Then start from any terminal:
+The installer downloads the latest `record.exe`, verifies its SHA-256 checksum, installs it under `%LOCALAPPDATA%\Programs\record`, and adds that directory to both the current shell and your persistent user `PATH`. Start immediately:
 
 ```powershell
 record
 ```
+
+Prefer a portable download? Get [record.exe](https://github.com/irbto/record/releases/latest/download/record.exe) from the [latest GitHub release](https://github.com/irbto/record/releases/latest) and run it directly. The release also includes a ZIP and checksums.
+
+With a Rust toolchain whose Cargo binary directory is already on `PATH`:
+
+```powershell
+cargo install --git https://github.com/irbto/record --locked
+```
+
+Cargo installs executables into `CARGO_HOME\bin` (normally `%USERPROFILE%\.cargo\bin`). Standard rustup installations put that directory on `PATH`; Cargo prints a warning when the surrounding Rust installation has not done so.
 
 ## Controls
 
@@ -76,7 +81,7 @@ record [OPTIONS]
 record doctor
 
 Options:
-  -o, --output <FILE>       Output path (adds .mp3 when omitted)
+  -o, --output <FILE>       Output path (defaults to the current directory)
   -b, --bitrate <BITRATE>   k128, k192, k256, or k320 [default: k320]
   -d, --duration <SECONDS>  Stop automatically, including fractional seconds
       --no-tui              Use line-oriented output for scripts or pipes

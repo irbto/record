@@ -4,6 +4,8 @@ All notable changes to this project will be documented here. The project follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-20
+
 ### Added
 
 - Immediate, no-menu system-audio capture from the default Windows output.
@@ -12,3 +14,5 @@ All notable changes to this project will be documented here. The project follows
 - Ratatui waveform, level meter, spectrum, split view, pause, and help controls.
 - Headless mode, timed recordings, overwrite protection, and `doctor` diagnostics.
 - Startup benchmark and Windows release automation.
+- Standalone Windows executable, verified one-line installer, and persistent user `PATH` setup.
+- Clickable OSC 8 file link for the finalized MP3 in supported terminals.

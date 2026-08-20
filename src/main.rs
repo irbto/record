@@ -160,13 +160,64 @@ fn run_headless(
 
 fn print_summary(summary: &RecordingSummary) {
     let seconds = summary.duration().as_secs_f64();
-    println!("✓ Saved {}", summary.output.display());
+    println!("✓ Saved {}", output_link(&summary.output));
     println!(
         "  {:.1}s · {} kbps MP3 · {} kHz stereo",
         seconds,
         summary.bitrate / 1_000,
         summary.sample_rate / 1_000
     );
+}
+
+fn output_link(path: &Path) -> String {
+    let label = path.display().to_string();
+    if !io::stdout().is_terminal() {
+        return label;
+    }
+
+    let Some(uri) = file_uri(path) else {
+        return label;
+    };
+    format!("\x1b]8;;{uri}\x1b\\{label}\x1b]8;;\x1b\\")
+}
+
+fn file_uri(path: &Path) -> Option<String> {
+    let absolute = std::path::absolute(path).ok()?;
+    let normalized = absolute.to_string_lossy().replace('\\', "/");
+    #[cfg(windows)]
+    let normalized = normalized.strip_prefix("//?/UNC/").map_or_else(
+        || {
+            normalized
+                .strip_prefix("//?/")
+                .unwrap_or(&normalized)
+                .to_owned()
+        },
+        |path| format!("//{path}"),
+    );
+    let encoded = percent_encode_uri_path(&normalized);
+
+    if normalized.starts_with("//") {
+        Some(format!("file:{encoded}"))
+    } else if normalized.starts_with('/') {
+        Some(format!("file://{encoded}"))
+    } else {
+        Some(format!("file:///{encoded}"))
+    }
+}
+
+fn percent_encode_uri_path(path: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/' | b':') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
 }
 
 fn output_path(requested: Option<&Path>) -> Result<PathBuf> {
@@ -247,6 +298,23 @@ mod tests {
         assert_eq!(
             output_path(Some(&requested)).unwrap(),
             requested.with_extension("mp3")
+        );
+    }
+
+    #[test]
+    fn hyperlink_uri_escapes_spaces_symbols_and_unicode() {
+        assert_eq!(
+            percent_encode_uri_path("C:/My Music/café #1.mp3"),
+            "C:/My%20Music/caf%C3%A9%20%231.mp3"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_file_uri_targets_an_absolute_path() {
+        assert_eq!(
+            file_uri(Path::new(r"C:\Users\Ada Lovelace\take #1.mp3")).as_deref(),
+            Some("file:///C:/Users/Ada%20Lovelace/take%20%231.mp3")
         );
     }
 }
