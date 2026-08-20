@@ -8,18 +8,7 @@
 
 `record` is a fast, native terminal recorder for Windows system audio. It records the mix playing through your default output device—not your microphone—and writes a high-quality MP3 without bundling FFmpeg or opening an arm screen first.
 
-```text
-╭ record  SYSTEM AUDIO ───────────────────────────────────────────────╮
-│              ● RECORDING   00:01:42   320 kbps · 48 kHz   WAVE    │
-╰─────────────────────────────────────────────────────────────────────╯
-╭ LEFT · 6 SECOND SCOPE ─────────────────────────────────────────────╮
-│  ⠀⠀⠀⣀⣤⣶⣄⡀⠀⠀⣠⣾⣿⣷⣄⠀⠀⠀⣀⣴⣶⣤⣀⠀⠀⣠⣾⣿⣷⣄⠀⠀               │
-╰─────────────────────────────────────────────────────────────────────╯
-╭ RIGHT · 6 SECOND SCOPE ────────────────────────────────────────────╮
-│  ⠀⣀⣴⣿⣷⣦⣀⠀⠀⣠⣶⣶⣄⠀⠀⠀⣀⣴⣿⣿⣦⣀⠀⠀⣠⣶⣶⣄⠀⠀                 │
-╰─────────────────────────────────────────────────────────────────────╯
-  Ctrl+C / S  save & stop    Space  pause    W  view    ?  help
-```
+![record running in Windows Terminal with live stereo waveforms, level meters, and a spectrum](assets/record-tui.png)
 
 ## Why this exists
 
