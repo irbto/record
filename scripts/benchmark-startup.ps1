@@ -9,7 +9,7 @@ param(
 $ErrorActionPreference = "Stop"
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $binary = Join-Path $repositoryRoot "target\release\record.exe"
-$probeFile = Join-Path ([IO.Path]::GetTempPath()) "record-startup-probe.mp3"
+$probeRoot = Join-Path ([IO.Path]::GetTempPath()) "record-startup-$([guid]::NewGuid().ToString('N'))"
 
 if (-not $NoBuild) {
     & cargo build --release --locked
@@ -27,13 +27,26 @@ function Get-Median([double[]] $Values) {
 }
 
 function Invoke-CaptureProbe {
-    $text = (& $binary --startup-probe --no-tui --output $probeFile --force 2>&1 | Out-String)
+    $previousProbe = $env:RECORD_INTERNAL_STARTUP_PROBE
+    $env:RECORD_INTERNAL_STARTUP_PROBE = "1"
+    Push-Location -LiteralPath $probeRoot
+    try {
+        $text = (& $binary 2>&1 | Out-String)
+    } finally {
+        Pop-Location
+        if ($null -eq $previousProbe) {
+            Remove-Item Env:RECORD_INTERNAL_STARTUP_PROBE -ErrorAction SilentlyContinue
+        } else {
+            $env:RECORD_INTERNAL_STARTUP_PROBE = $previousProbe
+        }
+    }
     if ($LASTEXITCODE -ne 0) { throw "Capture probe failed:`n$text" }
     if ($text -notmatch 'RECORD_READY_MS=([0-9.]+)') { throw "Capture probe did not report readiness." }
     return [double] $Matches[1]
 }
 
 try {
+    New-Item -ItemType Directory -Path $probeRoot | Out-Null
     1..3 | ForEach-Object {
         $null = & $binary --version
         $null = Invoke-CaptureProbe
@@ -70,7 +83,12 @@ try {
         if ($failed.Count) { throw "One or more startup budgets were exceeded." }
     }
 } finally {
-    if (Test-Path -LiteralPath $probeFile) {
-        Remove-Item -LiteralPath $probeFile -Force
+    $systemTemporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+    $resolvedProbeRoot = [IO.Path]::GetFullPath($probeRoot)
+    if (
+        (Test-Path -LiteralPath $resolvedProbeRoot) -and
+        $resolvedProbeRoot.StartsWith($systemTemporaryRoot, [StringComparison]::OrdinalIgnoreCase)
+    ) {
+        Remove-Item -LiteralPath $resolvedProbeRoot -Recurse -Force
     }
 }

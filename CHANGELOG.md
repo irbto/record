@@ -4,6 +4,26 @@ This file gives the important project changes. The project uses [Semantic Versio
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-20
+
+### Added
+
+- A bare `record` command creates one grouped session folder.
+- Sessions start a new MP3 at exact ten-minute boundaries by default.
+- The `--part-minutes` option changes the automatic part length.
+- `C` prompts for a clip name and continues capture in a new part.
+- The TUI shows finalized parts and clips in a saves panel.
+- `E` opens a named clip with complete left and right waveforms.
+- The clip editor supports frame-bounded trimming and selected-range preview.
+- Preview pauses capture and restores the prior pause state after playback.
+- The source has file-level design documentation and 90 unit tests.
+
+### Changed
+
+- Split view is the default TUI view.
+- The startup benchmark now measures the complete bare-command session path.
+- Explicit `-o FILE.mp3` keeps the single-file behavior.
+
 ## [0.1.0] - 2026-08-20
 
 ### Added

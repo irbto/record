@@ -26,15 +26,23 @@ jobs:
         run: |
           $textFiles = @(git ls-files "*.md" "*.yml" "*.yaml" "*.rs" "*.ps1" "*.toml")
           $emDash = [string][char]0x2014
-          $matches = @(Select-String -LiteralPath $textFiles -SimpleMatch $emDash)
+          $enDash = [string][char]0x2013
+          $matches = @(
+            Select-String -LiteralPath $textFiles -SimpleMatch $emDash
+            Select-String -LiteralPath $textFiles -SimpleMatch $enDash
+          )
           if ($matches.Count) {
             $matches | ForEach-Object { Write-Error $_.ToString() }
-            throw "Documentation must not contain em dashes."
+            throw "Project text must not contain en dashes or em dashes."
           }
       - name: Lint
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --locked --all-targets
+      - name: Documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps --document-private-items
       - name: Validate PowerShell scripts
         shell: pwsh
         run: |

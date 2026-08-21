@@ -26,6 +26,7 @@ Before you open a pull request, run these commands:
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
+cargo doc --no-deps --document-private-items
 cargo build --release
 ```
 
@@ -35,6 +36,9 @@ cargo build --release
 - `AudioEvent::Started` is the primary startup boundary. Do not use the TUI mount time as a substitute.
 - The TUI must show `RECORDING` only after WASAPI capture starts.
 - The audio thread must never wait for the renderer.
+- Session rotation must use exact encoded frame boundaries.
+- Clip preview must pause loopback capture and restore its prior state.
+- Clip replacement must occur only after the new MP3 is finalized.
 - A Windows build must not use FFmpeg or a different runtime encoder.
 - Each failure path must finalize a valid file or remove the incomplete file.
 - Include benchmark results with each startup change.
