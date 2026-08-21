@@ -21,5 +21,7 @@ pub mod session;
 pub mod spectrum;
 /// Ratatui application state and rendering.
 pub mod tui;
+/// Screen and system-audio video capture to MP4.
+pub mod video;
 /// Rolling stereo sample history for live scopes and meters.
 pub mod waveform;

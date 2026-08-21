@@ -1,6 +1,6 @@
 # record
 
-> Type `record`. Audio capture starts. Press `Ctrl+C`. Get an MP3.
+> Type `record` for MP3 system audio. Type `record video` for H.264/AAC MP4 screen capture.
 
 [![CI](https://github.com/irbto/record/actions/workflows/ci.yml/badge.svg)](https://github.com/irbto/record/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-7c3aed.svg)](LICENSE)
@@ -154,6 +154,47 @@ record -d 30 -b k192 -o demo.mp3
 record doctor
 ```
 
+## Screen recording
+
+`record video` captures the primary monitor and system audio into one MP4 with H.264 video and AAC audio. Capture starts immediately without a source picker. Press `Ctrl+C` to stop and save a playable file.
+
+```text
+record video [OPTIONS]
+
+Options:
+  -o, --output <FILE>         MP4 destination. Omit for a timestamped file
+      --video-bitrate <MBPS>  H.264 bit rate in megabits [default: 20]
+      --audio-bitrate <KBPS>  AAC bit rate in kilobits [default: 192]
+      --monitor <MONITOR>     primary, an index number, or list [default: primary]
+      --fit <MODE>            contain, cover, stretch, or native [default: contain]
+      --canvas <CANVAS>       WxH or preset: native, 1080p, 1440p, 4k, 720p, square
+      --crop <CROP>           LEFT,TOP,WIDTH,HEIGHT in source pixels
+      --fps <FPS>             Capture frame rate [default: 60]
+  -d, --duration <SECONDS>    Stop automatically
+  -f, --force                 Replace an existing output file
+```
+
+Examples:
+
+```powershell
+# Capture the primary monitor at source resolution.
+record video
+
+# List every attached monitor.
+record video --monitor list
+
+# Capture monitor 1 at 1080p with contain fit.
+record video --monitor 1 --canvas 1080p
+
+# Crop to the top-left quadrant and encode at 720p.
+record video --crop 0,0,1280,720 --canvas 720p
+```
+
+The recorder supports MP3 and MP4 only. No other container or codec is supported.
+
+Windows blocks desktop duplication for protected content such as Netflix or Blu-ray players. Those windows appear black in the recording. The recorder also stops when Windows switches to the secure desktop (UAC prompt or lock screen) and recovers when you return to the normal desktop.
+
+HDR displays are captured and encoded as SDR. The DXGI desktop duplication API returns SDR-mapped frames on HDR displays, so no tone mapping is needed. Colors may look slightly different from the HDR display.
 ## Startup design
 
 The no-argument path does not start the general CLI parser. It creates the session and starts the audio worker before it starts the TUI.

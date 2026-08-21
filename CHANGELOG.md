@@ -4,6 +4,16 @@ This file gives the important project changes. The project uses [Semantic Versio
 
 ## [Unreleased]
 
+### Added
+
+- `record video` captures the primary monitor and system audio to H.264/AAC MP4.
+- `--monitor` selects the primary monitor, an output index, or lists every monitor.
+- `--fit` selects contain, cover, stretch, or native source mapping.
+- `--canvas` selects a WxH size or a named preset such as 1080p.
+- `--crop` selects a LEFT,TOP,WIDTH,HEIGHT source rectangle.
+- Startup measurements print capture ready, recording ready, and finalize times.
+- Preview clamps the playback range to the device media length.
+
 ## [0.2.0] - 2026-08-20
 
 ### Added

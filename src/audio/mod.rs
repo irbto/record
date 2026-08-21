@@ -6,7 +6,7 @@
 //! away from the real-time capture loop.
 
 #[cfg(windows)]
-mod windows;
+pub(crate) mod windows;
 
 use std::{path::PathBuf, sync::Arc, sync::atomic::AtomicBool, time::Duration};
 

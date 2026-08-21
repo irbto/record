@@ -26,6 +26,21 @@ function Get-Median([double[]] $Values) {
     return ($sorted[$middle - 1] + $sorted[$middle]) / 2
 }
 
+function Invoke-VideoProbe {
+    Push-Location -LiteralPath $probeRoot
+    try {
+        $text = (& $binary video --no-tui -d 0.1 -f -o probe-video.mp4 2>&1 | Out-String)
+    } finally {
+        Pop-Location
+    }
+    if ($LASTEXITCODE -ne 0) {
+        if ($text -match "Access is denied") { return -1 }
+        throw "Video probe failed:`n$text"
+    }
+    if ($text -notmatch 'CAPTURE_READY_MS=([0-9.]+)') { throw "Video probe did not report readiness.`n$text" }
+    return [double] $Matches[1]
+}
+
 function Invoke-CaptureProbe {
     $previousProbe = $env:RECORD_INTERNAL_STARTUP_PROBE
     $env:RECORD_INTERNAL_STARTUP_PROBE = "1"
@@ -62,6 +77,7 @@ try {
         $ready.Add((Invoke-CaptureProbe))
     }
 
+    $videoReady = Invoke-VideoProbe
     $results = @(
         [pscustomobject]@{
             Metric = "CLI process (--version)"

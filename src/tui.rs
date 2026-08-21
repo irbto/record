@@ -185,6 +185,8 @@ struct App {
     bitrate: u32,
     /// Reports whether the help overlay is open.
     show_help: bool,
+    /// Describes the source that the saves selection currently targets.
+    source_label: Option<String>,
 }
 
 impl App {
@@ -217,6 +219,7 @@ impl App {
             sample_rate: 48_000,
             bitrate: 320_000,
             show_help: false,
+            source_label: None,
         }
     }
 
@@ -247,6 +250,26 @@ impl App {
         Ok(())
     }
 
+    /// Updates the header source label from the saves selection.
+    fn refresh_source_label(&mut self) {
+        self.source_label = self
+            .selected_save
+            .and_then(|index| self.saved.get(index))
+            .map(|file| {
+                let name = file
+                    .path
+                    .file_name()
+                    .unwrap_or(file.path.as_os_str())
+                    .to_string_lossy();
+                let kind = match file.kind {
+                    SavedFileKind::Recording => "FILE",
+                    SavedFileKind::Part => "PART",
+                    SavedFileKind::Clip => "CLIP",
+                };
+                format!("{kind} · {name}")
+            });
+    }
+
     /// Applies all pending audio events without waiting for another event.
     fn drain_audio_events(&mut self, events: &Receiver<AudioEvent>) {
         let mut samples_changed = false;
@@ -274,6 +297,7 @@ impl App {
                     self.notice = Some(format!("Saved {}", file.path.display()));
                     self.saved.push_back(file);
                     self.selected_save = Some(self.saved.len() - 1);
+                    self.refresh_source_label();
                 }
                 AudioEvent::Notice(message) => self.notice = Some(message),
                 AudioEvent::Finalizing => self.state = CaptureState::Finalizing,
@@ -453,6 +477,7 @@ impl App {
             Some(_) | None if !self.saved.is_empty() => Some(0),
             _ => None,
         };
+        self.refresh_source_label();
     }
 
     /// Moves the save-list selection toward the last item.
@@ -463,6 +488,7 @@ impl App {
             None if !self.saved.is_empty() => Some(0),
             None => None,
         };
+        self.refresh_source_label();
     }
 
     /// Loads the complete PCM waveform for the selected named clip.
@@ -888,7 +914,10 @@ impl App {
                         .unwrap_or(file.path.as_os_str())
                         .to_string_lossy();
                     let style = if Some(index) == self.selected_save {
-                        Style::default().fg(Color::White).bold()
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::White)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(MUTED)
                     };

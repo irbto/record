@@ -41,13 +41,30 @@ impl PreviewPlayer {
             &format!("set {} time format milliseconds", player.alias),
             false,
         )?;
+        // MCI rejects an end position past the reported media length. MP3
+        // duration can round down, especially right after a trim, so clamp
+        // the preview to what the device actually reports.
         let start_ms = start.as_millis();
-        let end_ms = end.as_millis().max(start_ms + 1);
+        let end_ms = end
+            .as_millis()
+            .min(u128::from(player.media_length_ms().unwrap_or(u64::MAX)))
+            .max(start_ms + 1);
         player.command(
             &format!("play {} from {start_ms} to {end_ms}", player.alias),
             false,
         )?;
         Ok(player)
+    }
+
+    /// Reports the device media length in milliseconds when available.
+    fn media_length_ms(&self) -> Option<u64> {
+        if !self.open {
+            return None;
+        }
+        self.command(&format!("status {} length", self.alias), true)
+            .ok()
+            .and_then(|length| length.trim().parse::<u64>().ok())
+            .filter(|length| *length > 0)
     }
 
     /// Reports whether Windows is still playing the selected range.
