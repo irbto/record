@@ -3,11 +3,11 @@ name = "record-tui"
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
-description = "One-command Windows system-audio recording with a live terminal waveform"
+description = "One-command Windows system-audio MP3 recording and DXGI screen capture to H.264/AAC MP4"
 repository = "https://github.com/irbto/record"
 homepage = "https://github.com/irbto/record"
 license = "MIT"
-keywords = ["audio", "recording", "terminal", "wasapi", "mp3"]
+keywords = ["audio", "recording", "terminal", "wasapi", "mp3", "screen-capture", "mp4", "h264"]
 categories = ["command-line-utilities", "multimedia::audio"]
 readme = "README.md"
 
@@ -27,6 +27,11 @@ rustfft = "6.4.1"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
     "Win32_Media_KernelStreaming",
     "Win32_Media_MediaFoundation",

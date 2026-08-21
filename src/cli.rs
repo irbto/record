@@ -101,10 +101,60 @@ impl Default for Cli {
 }
 
 #[derive(Debug, Subcommand)]
-/// Utility commands that do not record audio.
+/// Commands that run instead of audio capture.
 pub enum Command {
     /// Verify that WASAPI loopback and the native MP3 encoder are available.
     Doctor,
+    /// Capture the primary monitor and system audio to one MP4 file.
+    Video {
+        /// MP4 destination. Omit this option to create a timestamped file.
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+
+        /// H.264 bit rate in megabits per second.
+        #[arg(long, default_value_t = 20, value_name = "MBPS")]
+        video_bitrate: u32,
+
+        /// AAC bit rate in kilobits per second.
+        #[arg(long, default_value_t = 192, value_name = "KBPS")]
+        audio_bitrate: u32,
+
+        /// Monitor selection: primary (default), an index number, or "list".
+        #[arg(long, default_value = "primary", value_name = "MONITOR")]
+        monitor: String,
+
+        /// Fit mode: contain, cover, stretch, or native.
+        #[arg(long, default_value = "contain", value_name = "MODE")]
+        fit: String,
+
+        /// Canvas size as WxH (e.g. 1920x1080) or a preset name.
+        #[arg(long, value_name = "CANVAS")]
+        canvas: Option<String>,
+
+        /// Crop as LEFT,TOP,WIDTH,HEIGHT in source pixels.
+        #[arg(long, value_name = "CROP")]
+        crop: Option<String>,
+
+        /// Capture frame rate in frames per second.
+        #[arg(long, default_value_t = 60, value_name = "FPS")]
+        fps: u32,
+
+        /// Stop automatically after this many seconds.
+        #[arg(short, long, value_parser = parse_duration, value_name = "SECONDS")]
+        duration: Option<Duration>,
+
+        /// Replace an existing output file.
+        #[arg(short, long)]
+        force: bool,
+
+        /// Show the selected source and transform, then wait for Enter.
+        #[arg(long)]
+        setup: bool,
+
+        /// Disable the full-screen TUI.
+        #[arg(long)]
+        no_tui: bool,
+    },
 }
 
 /// Parses a duration in seconds.

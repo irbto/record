@@ -420,7 +420,7 @@ fn has_visual_event_capacity(events: &EventSender) -> bool {
 }
 
 /// Activates the default console render endpoint and obtains its mix format.
-fn default_audio_client() -> Result<(IAudioClient, MixFormat)> {
+pub(crate) fn default_audio_client() -> Result<(IAudioClient, MixFormat)> {
     let enumerator: IMMDeviceEnumerator = unsafe {
         CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
             .context("could not create the Windows audio-device enumerator")?
@@ -443,11 +443,11 @@ fn default_audio_client() -> Result<(IAudioClient, MixFormat)> {
 }
 
 /// Initializes multithreaded COM and balances it during drop.
-struct ComGuard;
+pub(crate) struct ComGuard;
 
 impl ComGuard {
     /// Initializes COM for the current audio or trim thread.
-    fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() }
             .context("could not initialize COM for the audio thread")?;
         Ok(Self)
@@ -461,11 +461,11 @@ impl Drop for ComGuard {
 }
 
 /// Starts Media Foundation and balances it during drop.
-struct MediaFoundationGuard;
+pub(crate) struct MediaFoundationGuard;
 
 impl MediaFoundationGuard {
     /// Starts the full Media Foundation platform for the current process.
-    fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }
             .context("could not start Windows Media Foundation")?;
         Ok(Self)
@@ -479,7 +479,7 @@ impl Drop for MediaFoundationGuard {
 }
 
 /// Owns a mix-format allocation returned by WASAPI.
-struct MixFormat(*mut WAVEFORMATEX);
+pub(crate) struct MixFormat(pub(crate) *mut WAVEFORMATEX);
 
 impl Drop for MixFormat {
     fn drop(&mut self) {
@@ -1180,13 +1180,13 @@ unsafe fn pcm_input_type(sample_rate: u32) -> Result<IMFMediaType> {
 
 #[derive(Clone, Copy, Debug)]
 /// Describes the endpoint sample layout and its stereo mix matrix.
-struct SourceFormat {
+pub(crate) struct SourceFormat {
     /// Contains the number of interleaved source channels.
-    channels: usize,
+    pub(crate) channels: usize,
     /// Contains source frames per second.
-    sample_rate: u32,
+    pub(crate) sample_rate: u32,
     /// Contains bytes between adjacent source frames.
-    block_align: usize,
+    pub(crate) block_align: usize,
     /// Contains bits reserved for each source sample.
     container_bits: u16,
     /// Contains meaningful bits in each integer sample.
@@ -1206,7 +1206,7 @@ impl SourceFormat {
     ///
     /// `pointer` must identify a valid `WAVEFORMATEX`. If its tag is extensible,
     /// it must identify a complete `WAVEFORMATEXTENSIBLE` value.
-    unsafe fn from_wave(pointer: *const WAVEFORMATEX) -> Result<Self> {
+    pub(crate) unsafe fn from_wave(pointer: *const WAVEFORMATEX) -> Result<Self> {
         let wave = unsafe { pointer.read_unaligned() };
         let mut format = Self {
             channels: usize::from(wave.nChannels),
@@ -1419,7 +1419,7 @@ fn speaker_coefficients(speaker: u32, channel: usize) -> (f32, f32) {
 }
 
 /// Converts source packets to stateful stereo PCM16 at the MP3 rate.
-struct Converter {
+pub(crate) struct Converter {
     /// Contains the source decoder and stereo matrix.
     source: SourceFormat,
     /// Contains target frames per second.
@@ -1434,9 +1434,9 @@ struct Converter {
 
 #[derive(Default)]
 /// Contains one converted block for the writer and terminal.
-struct ConvertedBlock {
+pub(crate) struct ConvertedBlock {
     /// Contains interleaved stereo PCM16 for Media Foundation.
-    pcm: Vec<i16>,
+    pub(crate) pcm: Vec<i16>,
     /// Contains normalized left samples for visualization.
     left: Vec<f32>,
     /// Contains normalized right samples for visualization.
@@ -1445,7 +1445,7 @@ struct ConvertedBlock {
 
 impl Converter {
     /// Creates an empty converter on a continuous source timeline.
-    const fn new(source: SourceFormat, target_rate: u32) -> Self {
+    pub(crate) const fn new(source: SourceFormat, target_rate: u32) -> Self {
         Self {
             source,
             target_rate,
@@ -1456,7 +1456,12 @@ impl Converter {
     }
 
     /// Decodes and resamples one source block without resetting interpolation.
-    fn process(&mut self, bytes: Option<&[u8]>, frames: usize, silent: bool) -> ConvertedBlock {
+    pub(crate) fn process(
+        &mut self,
+        bytes: Option<&[u8]>,
+        frames: usize,
+        silent: bool,
+    ) -> ConvertedBlock {
         let mut output = ConvertedBlock::default();
         if frames == 0 {
             return output;
@@ -1502,7 +1507,7 @@ impl Converter {
     }
 
     /// Emits the final interpolation positions after capture stops.
-    fn flush(&mut self) -> ConvertedBlock {
+    pub(crate) fn flush(&mut self) -> ConvertedBlock {
         let mut output = ConvertedBlock::default();
         let Some((left, right)) = self.previous else {
             return output;

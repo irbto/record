@@ -14,6 +14,7 @@ use std::{
     env, fs,
     io::{self, IsTerminal, Write},
     path::Path,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -30,6 +31,10 @@ use record_tui::{
     cli::{Cli, Command},
     session::{OutputTarget, create_session_directory, mp3_output_path},
     tui,
+    video::{
+        CropRect, FitMode, VideoConfig, VideoEvent, VideoSource, canvas_presets,
+        check_video_support, enumerate_monitors, record_video, video_timestamp,
+    },
 };
 
 fn main() -> Result<()> {
@@ -51,7 +56,18 @@ fn main() -> Result<()> {
         println!("✓ default Windows output found");
         println!("✓ WASAPI loopback available");
         println!("✓ native Media Foundation MP3 encoder available");
+        match check_video_support() {
+            Ok(()) => {
+                println!("✓ D3D11 device with desktop duplication available");
+                println!("✓ native Media Foundation H.264 and AAC encoders available");
+            }
+            Err(error) => println!("✗ screen capture unavailable: {error:#}"),
+        }
         return Ok(());
+    }
+
+    if matches!(cli.command, Some(Command::Video { .. })) {
+        return run_video(cli, launched_at);
     }
 
     let target = output_target(
@@ -61,7 +77,6 @@ fn main() -> Result<()> {
         Path::new("."),
     )?;
     let output = target.root().to_path_buf();
-
     let stop = Arc::new(AtomicBool::new(false));
     let paused = Arc::new(AtomicBool::new(false));
     {
@@ -69,7 +84,6 @@ fn main() -> Result<()> {
         ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed))
             .context("could not install the Ctrl+C handler")?;
     }
-
     let (event_sender, event_receiver) = bounded(64);
     let (command_sender, command_receiver) = bounded(8);
     let config = RecordConfig {
@@ -122,6 +136,252 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Runs the `record video` command with its own pipeline and headless output.
+fn run_video(cli: Cli, _launched_at: Instant) -> Result<()> {
+    let Some(Command::Video {
+        output,
+        monitor,
+        fit,
+        canvas,
+        crop,
+        video_bitrate,
+        audio_bitrate,
+        fps,
+        duration,
+        force,
+        setup,
+        no_tui: _unused_no_tui,
+    }) = cli.command
+    else {
+        unreachable!("run_video is only called for the video command");
+    };
+    check_video_support()?;
+    let output = match output {
+        Some(path) => {
+            let mut path = path;
+            if path.extension().is_none() {
+                path.set_extension("mp4");
+            }
+            if path
+                .extension()
+                .is_some_and(|extension| !extension.eq_ignore_ascii_case("mp4"))
+            {
+                bail!("the video output file must use the .mp4 extension");
+            }
+            if path.exists() && !force {
+                bail!(
+                    "refusing to overwrite {}; choose another path or pass --force",
+                    path.display()
+                );
+            }
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("could not create output directory {}", parent.display())
+                })?;
+            }
+            path
+        }
+        None => PathBuf::from(format!("recording-{}.mp4", video_timestamp())),
+    };
+    let fit_mode = match fit.to_lowercase().as_str() {
+        "contain" => FitMode::Contain,
+        "cover" => FitMode::Cover,
+        "stretch" => FitMode::Stretch,
+        "native" => FitMode::Native,
+        _ => bail!("invalid fit {fit}; use contain, cover, stretch, or native"),
+    };
+    let (canvas_width, canvas_height) = match canvas.as_deref() {
+        None => (0, 0),
+        Some(value) => {
+            let preset = canvas_presets()
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(value));
+            if let Some((_, size)) = preset {
+                (size.width, size.height)
+            } else if let Some((width, height)) = value.split_once('x') {
+                let width: u32 = width
+                    .parse()
+                    .map_err(|_| anyhow!("invalid canvas width in {value}"))?;
+                let height: u32 = height
+                    .parse()
+                    .map_err(|_| anyhow!("invalid canvas height in {value}"))?;
+                if width == 0 || height == 0 {
+                    bail!("canvas dimensions must be greater than zero");
+                }
+                (width, height)
+            } else {
+                bail!("invalid canvas {value}; use WxH or a preset name");
+            }
+        }
+    };
+    let crop_rect = match crop.as_deref() {
+        None => CropRect::default(),
+        Some(value) => {
+            let parts: Vec<&str> = value.split(',').collect();
+            if parts.len() != 4 {
+                bail!("crop must be LEFT,TOP,WIDTH,HEIGHT");
+            }
+            let left: u32 = parts[0]
+                .trim()
+                .parse()
+                .map_err(|_| anyhow!("invalid crop left in {value}"))?;
+            let top: u32 = parts[1]
+                .trim()
+                .parse()
+                .map_err(|_| anyhow!("invalid crop top in {value}"))?;
+            let width: u32 = parts[2]
+                .trim()
+                .parse()
+                .map_err(|_| anyhow!("invalid crop width in {value}"))?;
+            let height: u32 = parts[3]
+                .trim()
+                .parse()
+                .map_err(|_| anyhow!("invalid crop height in {value}"))?;
+            if width == 0 || height == 0 {
+                bail!("crop dimensions must be greater than zero");
+            }
+            CropRect {
+                left,
+                top,
+                width,
+                height,
+            }
+        }
+    };
+    let monitors = enumerate_monitors().context("could not enumerate monitors")?;
+    let monitor_index = if monitor.eq_ignore_ascii_case("primary") {
+        monitors
+            .iter()
+            .find(|monitor| monitor.primary)
+            .map(|monitor| monitor.index)
+            .context("no primary monitor found")?
+    } else if monitor.eq_ignore_ascii_case("list") {
+        for monitor in &monitors {
+            let primary = if monitor.primary { " (primary)" } else { "" };
+            println!(
+                "  {} {} {}x{}{}",
+                monitor.index, monitor.name, monitor.width, monitor.height, primary
+            );
+        }
+        return Ok(());
+    } else {
+        monitor.parse::<u32>().context(format!(
+            "invalid monitor {monitor}; use a monitor index, primary, or list"
+        ))?
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(AtomicBool::new(false));
+    {
+        let stop = Arc::clone(&stop);
+        ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed))
+            .context("could not install the Ctrl+C handler")?;
+    }
+    if setup {
+        println!("record video setup");
+        println!("  monitor: {monitor}");
+        println!("  fit: {}", fit_mode.label());
+        if canvas_width > 0 {
+            println!("  canvas: {canvas_width}x{canvas_height}");
+        } else {
+            println!("  canvas: native source size");
+        }
+        if crop_rect.left > 0 || crop_rect.top > 0 {
+            println!(
+                "  crop: {},{},{},{}",
+                crop_rect.left, crop_rect.top, crop_rect.width, crop_rect.height
+            );
+        } else {
+            println!("  crop: full frame");
+        }
+        println!("  fps: {fps}");
+        println!();
+        println!("Press Enter to start capture.");
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("could not read Enter")?;
+    }
+    let (event_sender, event_receiver) = bounded(64);
+    let config = VideoConfig {
+        source: if monitor_index == 0 {
+            VideoSource::Primary
+        } else {
+            VideoSource::Index(monitor_index)
+        },
+        crop: crop_rect,
+        fit: fit_mode,
+        canvas_width,
+        canvas_height,
+        video_bitrate: video_bitrate * 1_000_000,
+        audio_bitrate: audio_bitrate * 1_000,
+        fps: fps.clamp(1, 60),
+        duration,
+        output: output.clone(),
+        replace: force,
+        stop: Arc::clone(&stop),
+        paused: Arc::clone(&paused),
+    };
+    let worker = thread::Builder::new()
+        .name("record-video".to_owned())
+        .spawn(move || record_video(config, &event_sender))
+        .context("could not start the video thread")?;
+    eprintln!("● Recording screen → {}", output.display());
+    eprintln!("  Press Ctrl+C to stop and save.");
+    let summary = loop {
+        if worker.is_finished() {
+            break worker.join().map_err(|panic| {
+                if let Some(message) = panic.downcast_ref::<&str>() {
+                    anyhow!("video thread panicked: {message}")
+                } else if let Some(message) = panic.downcast_ref::<String>() {
+                    anyhow!("video thread panicked: {message}")
+                } else {
+                    anyhow!("video thread panicked")
+                }
+            })??;
+        }
+        if let Ok(event) = event_receiver.try_recv() {
+            match event {
+                VideoEvent::Started {
+                    width,
+                    height,
+                    fps,
+                    capture_ready_ms,
+                    ..
+                } => {
+                    eprintln!("  {width}x{height} @ {fps} fps · H.264 + AAC");
+                    eprintln!("CAPTURE_READY_MS={capture_ready_ms:.3}");
+                }
+                VideoEvent::Notice(message) => eprintln!("  {message}"),
+                VideoEvent::Finalizing => eprint!("  Finalizing MP4..."),
+                VideoEvent::Saved(_) => {}
+            }
+        }
+        if stop.load(Ordering::Relaxed) {
+            eprint!("  Finalizing MP4...");
+        }
+        std::thread::sleep(Duration::from_millis(33));
+    };
+    println!("✓ Saved {}", output_link(&summary.output));
+    println!(
+        "  {:.1}s · {}x{} @ {} fps · H.264 {} Mbps + AAC {} kbps",
+        summary.duration().as_secs_f64(),
+        summary.width,
+        summary.height,
+        summary.fps,
+        summary.video_bitrate / 1_000_000,
+        summary.audio_bitrate / 1_000
+    );
+    if let Some(ready) = summary.recording_ready_ms {
+        println!(
+            "  capture ready {ready:.1} ms · finalized in {:.1} ms",
+            summary.finalize_ms
+        );
+    }
+    Ok(())
+}
 /// Reports capture progress when full-screen terminal control is not available.
 fn run_headless(
     events: &Receiver<AudioEvent>,
