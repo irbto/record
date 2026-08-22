@@ -15,6 +15,7 @@ This file gives the important project changes. The project uses [Semantic Versio
 - Preview clamps the playback range to the device media length.
 - `record video` runs the same full-screen Ratatui interface as audio capture,
   with `--no-tui` keeping the line output for scripts.
+- `record review <file.mp4>` scrubs a finished recording in the terminal. A background Source Reader thread decodes H.264 pictures, and a half-block renderer paints two pixel rows per character cell without graphics protocols or new crates.
 
 ### Fixed
 
