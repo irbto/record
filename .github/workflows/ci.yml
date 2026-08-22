@@ -36,13 +36,13 @@ jobs:
             throw "Project text must not contain en dashes or em dashes."
           }
       - name: Lint
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
-        run: cargo test --locked --all-targets
+        run: cargo test --all-targets
       - name: Documentation
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --locked --no-deps --document-private-items
+        run: cargo doc --no-deps --document-private-items
       - name: Validate PowerShell scripts
         shell: pwsh
         run: |
@@ -51,7 +51,7 @@ jobs:
           [Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/benchmark-startup.ps1", [ref]$null, [ref]$errors) | Out-Null
           if ($errors.Count) { throw ($errors | Out-String) }
       - name: Release build
-        run: cargo build --locked --release
+        run: cargo build --release
 
   msrv:
     name: Rust 1.88
@@ -61,7 +61,7 @@ jobs:
       - name: Install MSRV
         run: rustup toolchain install 1.88.0 --profile minimal
       - name: Check minimum supported Rust
-        run: cargo +1.88.0 check --locked --all-targets
+        run: cargo +1.88.0 check --all-targets
 
   release-tag:
     name: Tag release
