@@ -13,6 +13,19 @@ This file gives the important project changes. The project uses [Semantic Versio
 - `--crop` selects a LEFT,TOP,WIDTH,HEIGHT source rectangle.
 - Startup measurements print capture ready, recording ready, and finalize times.
 - Preview clamps the playback range to the device media length.
+- `record video` runs the same full-screen Ratatui interface as audio capture,
+  with `--no-tui` keeping the line output for scripts.
+
+### Fixed
+
+- The default crop no longer collapses the native canvas to a 2x2 frame that
+  Media Foundation rejected with 0xC00D36B4 before capture started.
+- Video samples carry explicit durations, fixing the 0xC00D36C9 write failure
+  that stopped every recording at the first frame.
+- Video timestamps follow a recorded-time clock that freezes during pauses, so
+  pause spans stay aligned with the self-clocked audio timeline.
+- Idle screens emit an initial black frame so `--duration` still completes when
+  the desktop never updates.
 
 ## [0.2.0] - 2026-08-20
 

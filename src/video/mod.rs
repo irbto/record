@@ -127,15 +127,18 @@ impl FitMode {
 }
 
 /// Describes a crop rectangle in source pixel coordinates.
+///
+/// The default value has a zero size, which [`effective_crop`] resolves to
+/// the full source frame.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CropRect {
     /// Left edge in source pixels.
     pub left: u32,
     /// Top edge in source pixels.
     pub top: u32,
-    /// Crop width in source pixels.
+    /// Crop width in source pixels; zero selects the full width.
     pub width: u32,
-    /// Crop height in source pixels.
+    /// Crop height in source pixels; zero selects the full height.
     pub height: u32,
 }
 
@@ -233,8 +236,9 @@ pub fn transform_geometry(
     canvas_width: u32,
     canvas_height: u32,
 ) -> (u32, u32, f64, f64) {
-    let crop_width = crop.width.min(source_width);
-    let crop_height = crop.height.min(source_height);
+    // The floor keeps degenerate crops from dividing the scale by zero.
+    let crop_width = crop.width.min(source_width).max(2);
+    let crop_height = crop.height.min(source_height).max(2);
     let (canvas_width, canvas_height) = if canvas_width == 0 || canvas_height == 0 {
         let even_width = crop_width & !1;
         let even_height = crop_height & !1;
@@ -262,6 +266,24 @@ pub fn transform_geometry(
         FitMode::Native => (1.0, 1.0),
     };
     (canvas_width, canvas_height, scale_x, scale_y)
+}
+
+/// Resolves the effective crop for one source size.
+///
+/// A zero width or height means "no crop was requested", which captures the
+/// full frame. Every other rectangle clamps to the source bounds.
+#[must_use]
+pub fn effective_crop(crop: &CropRect, source_width: u32, source_height: u32) -> CropRect {
+    if crop.width == 0 || crop.height == 0 {
+        return CropRect {
+            left: 0,
+            top: 0,
+            width: source_width,
+            height: source_height,
+        }
+        .clamp_to(source_width, source_height);
+    }
+    crop.clamp_to(source_width, source_height)
 }
 /// Contains all settings for one video recording process.
 #[derive(Clone, Debug)]
@@ -390,7 +412,7 @@ fn record_video_inner(config: &VideoConfig, events: &Sender<VideoEvent>) -> Resu
     let (width, height) = duplication.size();
     let even_width = width & !1;
     let even_height = height & !1;
-    let crop = config.crop.clamp_to(even_width, even_height);
+    let crop = effective_crop(&config.crop, even_width, even_height);
     let (encoded_width, encoded_height, _scale_x, _scale_y) = transform_geometry(
         even_width,
         even_height,
@@ -440,8 +462,8 @@ fn record_video_inner(config: &VideoConfig, events: &Sender<VideoEvent>) -> Resu
     unsafe { audio_client.Start()? };
 
     let _ = events.try_send(VideoEvent::Started {
-        width: even_width,
-        height: even_height,
+        width: encoded_width,
+        height: encoded_height,
         fps: config.fps,
         sample_rate: audio_rate,
         capture_ready_ms: started.elapsed().as_secs_f64() * 1_000.0,
@@ -456,6 +478,8 @@ fn record_video_inner(config: &VideoConfig, events: &Sender<VideoEvent>) -> Resu
     let mut recording_ready_ms: Option<f64> = None;
     let mut next_frame_time = Instant::now();
     let mut last_frame: Option<Nv12Frame> = None;
+    let mut recorded_time = RecordedTime::new();
+    let mut was_paused = false;
 
     loop {
         if config.stop.load(Ordering::Relaxed) {
@@ -471,7 +495,17 @@ fn record_video_inner(config: &VideoConfig, events: &Sender<VideoEvent>) -> Resu
         }
         next_frame_time += frame_interval;
 
-        if !config.paused.load(Ordering::Relaxed) {
+        let paused_now = config.paused.load(Ordering::Relaxed);
+        if was_paused && !paused_now {
+            // Wall time advanced while paused. Rebase the audio gap detector so
+            // the paused span stays omitted from both streams instead of
+            // becoming inserted silence under a frozen video timeline.
+            expected_position = None;
+        }
+        was_paused = paused_now;
+
+        let mut wrote_frame = false;
+        if !paused_now {
             match duplication.capture_next_frame() {
                 Ok(Some(texture)) => {
                     let nv12 = unsafe {
@@ -484,18 +518,23 @@ fn record_video_inner(config: &VideoConfig, events: &Sender<VideoEvent>) -> Resu
                             crop.height,
                         )?
                     };
-                    unsafe { writer.write_video_frame(&nv12, started.elapsed())? };
+                    unsafe { writer.write_video_frame(&nv12, recorded_time.value())? };
                     if recording_ready_ms.is_none() {
                         recording_ready_ms = Some(started.elapsed().as_secs_f64() * 1_000.0);
                     }
                     last_frame = Some(nv12);
+                    wrote_frame = true;
                 }
                 Ok(None) => {
                     // The desktop did not update. Duplicate the previous frame
                     // so the H.264 timeline stays aligned with the audio clock.
-                    if let Some(frame) = &last_frame {
-                        unsafe { writer.write_video_frame(frame, started.elapsed())? };
-                    }
+                    // Before any update arrives, emit one black frame so that
+                    // idle screens still start the timeline and honor
+                    // the configured duration.
+                    let frame =
+                        last_frame.get_or_insert_with(|| Nv12Frame::black(crop.width, crop.height));
+                    unsafe { writer.write_video_frame(frame, recorded_time.value())? };
+                    wrote_frame = true;
                 }
                 Err(error) => {
                     // Windows can invalidate the session on display changes,
@@ -506,6 +545,9 @@ fn record_video_inner(config: &VideoConfig, events: &Sender<VideoEvent>) -> Resu
                     }
                     last_frame = None;
                 }
+            }
+            if wrote_frame {
+                recorded_time.tick(frame_interval, false);
             }
         }
 
@@ -814,6 +856,22 @@ struct Nv12Frame {
     data: Vec<u8>,
 }
 
+impl Nv12Frame {
+    /// Creates an all-black NV12 frame with neutral chroma.
+    ///
+    /// The luma plane stays zero and the chroma planes sit at 128 so encoders
+    /// see a valid neutral black picture.
+    fn black(width: u32, height: u32) -> Self {
+        let luma_size = width as usize * height as usize;
+        let chroma_size = luma_size / 2;
+        let mut data = vec![0_u8; luma_size + chroma_size];
+        for byte in &mut data[luma_size..] {
+            *byte = 128;
+        }
+        Self { data }
+    }
+}
+
 /// Owns one Media Foundation sink writer with H.264 and AAC streams.
 struct Mp4Writer {
     writer: Option<IMFSinkWriter>,
@@ -950,6 +1008,7 @@ impl Mp4Writer {
         unsafe {
             sample.AddBuffer(&buffer)?;
             sample.SetSampleTime((timestamp.as_nanos() / 100) as i64)?;
+            sample.SetSampleDuration(frame_duration_100ns(self.fps))?;
             sample.SetUINT32(&MFSampleExtension_CleanPoint, 1)?;
             self.writer
                 .as_ref()
@@ -1142,6 +1201,45 @@ const fn nearest_aac_rate(source_rate: u32) -> u32 {
         44_100
     } else {
         48_000
+    }
+}
+
+/// Returns the per-frame media duration in 100 nanosecond units.
+///
+/// Media Foundation rejects video samples without an explicit duration, so
+/// every frame carries `1 / fps` even when the desktop did not update.
+#[must_use]
+const fn frame_duration_100ns(fps: u32) -> i64 {
+    let fps = if fps < 1 { 1 } else { fps };
+    (10_000_000_u64 / fps as u64) as i64
+}
+
+/// Tracks encoded media time that only advances while capture is not paused.
+///
+/// Wall-clock timestamps would race ahead of the self-clocked audio timeline
+/// during a pause, so video samples stamp this accumulated value instead.
+struct RecordedTime {
+    value: Duration,
+}
+
+impl RecordedTime {
+    /// Creates a zeroed media clock.
+    const fn new() -> Self {
+        Self {
+            value: Duration::ZERO,
+        }
+    }
+
+    /// Adds one frame interval unless the recorder is paused.
+    fn tick(&mut self, interval: Duration, paused: bool) {
+        if !paused {
+            self.value += interval;
+        }
+    }
+
+    /// Returns the current media timestamp for encoded samples.
+    const fn value(&self) -> Duration {
+        self.value
     }
 }
 
@@ -1617,5 +1715,119 @@ mod tests {
         assert!(summary.recording_ready_ms.is_none());
         summary.recording_ready_ms = Some(250.5);
         assert_eq!(summary.recording_ready_ms, Some(250.5));
+    }
+
+    #[test]
+    fn default_crop_covers_the_full_native_canvas() {
+        // Regression: CropRect::default() has a zero size, which used to clamp
+        // to a 2x2 canvas and fail encoder setup with MF_E_INVALIDMEDIATYPE.
+        let crop = effective_crop(&CropRect::default(), 2560, 1440);
+        assert_eq!((crop.left, crop.top), (0, 0));
+        assert_eq!((crop.width, crop.height), (2560, 1440));
+        let (width, height, _, _) = transform_geometry(
+            2560,
+            1440,
+            &crop,
+            FitMode::Contain,
+            0,
+            0,
+        );
+        assert_eq!((width, height), (2560, 1440));
+    }
+
+    #[test]
+    fn effective_crop_treats_any_zero_dimension_as_full_frame() {
+        let width_only = CropRect {
+            left: 40,
+            top: 30,
+            width: 100,
+            height: 0,
+        };
+        let crop = effective_crop(&width_only, 1920, 1080);
+        assert_eq!((crop.left, crop.top), (0, 0));
+        assert_eq!((crop.width, crop.height), (1920, 1080));
+    }
+
+    #[test]
+    fn effective_crop_keeps_and_clamps_explicit_rectangles() {
+        let partial = CropRect {
+            left: 100,
+            top: 50,
+            width: 200,
+            height: 300,
+        };
+        assert_eq!(
+            effective_crop(&partial, 1920, 1080),
+            CropRect {
+                left: 100,
+                top: 50,
+                width: 200,
+                height: 300
+            }
+        );
+        let oversized = CropRect {
+            left: u32::MAX,
+            top: u32::MAX,
+            width: 5000,
+            height: 5000,
+        };
+        let clamped = effective_crop(&oversized, 1920, 1080);
+        assert!(clamped.width >= 2 && clamped.height >= 2);
+        assert!(clamped.left < 1920 && clamped.top < 1080);
+    }
+
+    #[test]
+    fn transform_geometry_survives_a_degenerate_crop() {
+        // Defensive: a zero-size crop must not divide the scale by zero.
+        let degenerate = CropRect {
+            left: 0,
+            top: 0,
+            width: 0,
+            height: 0,
+        };
+        let (_, _, scale_x, scale_y) =
+            transform_geometry(1920, 1080, &degenerate, FitMode::Contain, 0, 0);
+        assert!(scale_x.is_finite());
+        assert!(scale_y.is_finite());
+    }
+
+    #[test]
+    fn frame_duration_matches_the_requested_fps() {
+        assert_eq!(frame_duration_100ns(60), 166_666);
+        assert_eq!(frame_duration_100ns(30), 333_333);
+        assert_eq!(frame_duration_100ns(1), 10_000_000);
+        assert_eq!(frame_duration_100ns(0), 10_000_000);
+    }
+
+    #[test]
+    fn recorded_time_advances_only_while_not_paused() {
+        let interval = Duration::from_secs_f64(1.0 / 60.0);
+        let mut clock = RecordedTime::new();
+        for _ in 0..60 {
+            clock.tick(interval, false);
+        }
+        assert_eq!(clock.value().as_secs(), 1);
+        let frozen = clock.value();
+        clock.tick(interval, true);
+        clock.tick(interval, true);
+        assert_eq!(clock.value(), frozen);
+        clock.tick(interval, false);
+        assert_eq!(
+            (clock.value() - frozen).as_secs_f64(),
+            interval.as_secs_f64()
+        );
+        assert_eq!(RecordedTime::new().value(), Duration::ZERO);
+    }
+
+    #[test]
+    fn black_frame_matches_the_nv12_layout() {
+        let frame = Nv12Frame::black(2560, 1440);
+        let luma_size = 2560 * 1440;
+        assert_eq!(frame.data.len(), luma_size + luma_size / 2);
+        assert!(frame.data[..luma_size].iter().all(|byte| *byte == 0));
+        assert!(frame.data[luma_size..].iter().all(|byte| *byte == 128));
+
+        let small = Nv12Frame::black(2, 2);
+        assert_eq!(small.data, vec![0, 0, 0, 0, 128, 128]);
     }
 }
