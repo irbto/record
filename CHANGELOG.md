@@ -16,6 +16,7 @@ This file gives the important project changes. The project uses [Semantic Versio
 - `record video` runs the same full-screen Ratatui interface as audio capture,
   with `--no-tui` keeping the line output for scripts.
 - `record review <file.mp4>` scrubs a finished recording in the terminal. A background Source Reader thread decodes H.264 pictures, and a half-block renderer paints two pixel rows per character cell without graphics protocols or new crates.
+- Merging a version bump to `main` now tags the release automatically once tests pass, which publishes the Windows exe through the existing release workflow.
 
 ### Fixed
 
