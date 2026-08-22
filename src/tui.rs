@@ -1279,8 +1279,10 @@ impl VideoApp {
         let now = Instant::now();
         let delta = now - self.tick;
         self.tick = now;
-        if matches!(self.state, CaptureState::Recording | CaptureState::Previewing)
-            && !self.paused.load(Ordering::Relaxed)
+        if matches!(
+            self.state,
+            CaptureState::Recording | CaptureState::Previewing
+        ) && !self.paused.load(Ordering::Relaxed)
         {
             self.recorded += delta;
         }
@@ -1420,16 +1422,16 @@ impl VideoApp {
             TextLine::from(vec![
                 Span::styled(" OUTPUT   ", Style::default().fg(MUTED)),
                 Span::styled(
-                    compact_path(&self.output, usize::from(area.width.saturating_sub(12)).max(8)),
+                    compact_path(
+                        &self.output,
+                        usize::from(area.width.saturating_sub(12)).max(8),
+                    ),
                     Style::default().fg(Color::White),
                 ),
             ]),
             TextLine::from(vec![
                 Span::styled(" AUDIO    ", Style::default().fg(MUTED)),
-                Span::raw(format!(
-                    "{} kHz stereo AAC",
-                    self.sample_rate / 1_000
-                )),
+                Span::raw(format!("{} kHz stereo AAC", self.sample_rate / 1_000)),
             ]),
         ];
         if let Some(ready) = self.capture_ready_ms {
@@ -1975,7 +1977,9 @@ mod tests {
     fn video_notice_and_finalizing_events_update_state() {
         let mut app = video_app();
         let (sender, receiver) = bounded(8);
-        sender.send(VideoEvent::Notice("duplication reset".to_owned())).unwrap();
+        sender
+            .send(VideoEvent::Notice("duplication reset".to_owned()))
+            .unwrap();
         sender.send(VideoEvent::Finalizing).unwrap();
         app.drain_video_events(&receiver);
         assert_eq!(app.notice.as_deref(), Some("duplication reset"));

@@ -1724,14 +1724,7 @@ mod tests {
         let crop = effective_crop(&CropRect::default(), 2560, 1440);
         assert_eq!((crop.left, crop.top), (0, 0));
         assert_eq!((crop.width, crop.height), (2560, 1440));
-        let (width, height, _, _) = transform_geometry(
-            2560,
-            1440,
-            &crop,
-            FitMode::Contain,
-            0,
-            0,
-        );
+        let (width, height, _, _) = transform_geometry(2560, 1440, &crop, FitMode::Contain, 0, 0);
         assert_eq!((width, height), (2560, 1440));
     }
 
