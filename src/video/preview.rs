@@ -3,10 +3,11 @@
 //! A helper thread opens the finalized MP4 with the native Media Foundation
 //! Source Reader, decodes H.264 pictures to RGB, downsamples them to a
 //! bounded size, and ships them across a bounded channel. The terminal
-//! thread never blocks on decode work. [`HalfblockImage`] paints one decoded
-//! picture into two pixel rows per character cell using the Unicode upper
-//! half block with foreground and background colors, so previews work in
-//! every terminal without graphics protocols or extra dependencies.
+//! thread never blocks on decode work.
+//! [`crate::video::preview::HalfblockImage`] paints one decoded picture into
+//! two pixel rows per character cell using the Unicode upper half block with
+//! foreground and background colors, so previews work in every terminal
+//! without graphics protocols or extra dependencies.
 
 use std::{
     os::windows::ffi::OsStrExt,
