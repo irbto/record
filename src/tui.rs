@@ -18,7 +18,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -44,6 +44,7 @@ use crate::{
     },
     session::{OutputTarget, clip_stem},
     spectrum::Spectrum,
+    video::{VideoEvent, VideoSummary},
     waveform::Waveform,
 };
 
@@ -105,6 +106,18 @@ pub fn run(
     target: OutputTarget,
 ) -> Result<()> {
     let mut app = App::new(stop, paused, commands, target);
+    ratatui::run(|terminal| app.run(terminal, events, worker))
+}
+
+/// Runs the full-screen screen-capture interface until the video worker stops.
+pub fn run_video(
+    events: &Receiver<VideoEvent>,
+    worker: &JoinHandle<Result<VideoSummary>>,
+    stop: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    output: PathBuf,
+) -> Result<()> {
+    let mut app = VideoApp::new(stop, paused, output);
     ratatui::run(|terminal| app.run(terminal, events, worker))
 }
 
@@ -1181,13 +1194,315 @@ impl App {
         } else {
             Duration::from_secs_f64(self.encoded_frames as f64 / f64::from(self.sample_rate))
         };
-        let total = duration.as_secs();
-        format!(
-            "{:02}:{:02}:{:02}",
-            total / 3_600,
-            total / 60 % 60,
-            total % 60
+        format_clock(duration)
+    }
+}
+
+/// Owns all terminal state for one screen-capture process.
+struct VideoApp {
+    /// Contains the capture state that the header shows.
+    state: CaptureState,
+    /// Requests final capture shutdown.
+    stop: Arc<AtomicBool>,
+    /// Omits capture packets while true.
+    paused: Arc<AtomicBool>,
+    /// Contains the destination MP4 path.
+    output: PathBuf,
+    /// Contains short backend feedback for the status panel.
+    notice: Option<String>,
+    /// Reports whether the help overlay is open.
+    show_help: bool,
+    /// Contains the encoded frame width once capture starts.
+    width: u32,
+    /// Contains the encoded frame height once capture starts.
+    height: u32,
+    /// Contains the encoded frame rate once capture starts.
+    fps: u32,
+    /// Contains the AAC sample rate once capture starts.
+    sample_rate: u32,
+    /// Contains milliseconds from start to capture readiness.
+    capture_ready_ms: Option<f64>,
+    /// Contains recorded media time, excluding pauses.
+    recorded: Duration,
+    /// Contains the previous loop instant for elapsed accumulation.
+    tick: Instant,
+}
+
+impl VideoApp {
+    /// Creates the initial state before the first backend event arrives.
+    fn new(stop: Arc<AtomicBool>, paused: Arc<AtomicBool>, output: PathBuf) -> Self {
+        Self {
+            state: CaptureState::Starting,
+            stop,
+            paused,
+            output,
+            notice: None,
+            show_help: false,
+            width: 0,
+            height: 0,
+            fps: 0,
+            sample_rate: 48_000,
+            capture_ready_ms: None,
+            recorded: Duration::ZERO,
+            tick: Instant::now(),
+        }
+    }
+
+    /// Draws frames and handles input until the video worker stops.
+    fn run(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        events: &Receiver<VideoEvent>,
+        worker: &JoinHandle<Result<VideoSummary>>,
+    ) -> Result<()> {
+        loop {
+            self.advance_recorded_time();
+            self.drain_video_events(events);
+            if worker.is_finished() {
+                break;
+            }
+            terminal.draw(|frame| self.render(frame))?;
+            if event::poll(Duration::from_millis(33))? {
+                self.handle_event(event::read()?);
+            }
+            if self.stop.load(Ordering::Relaxed) {
+                self.state = CaptureState::Finalizing;
+            }
+        }
+        self.drain_video_events(events);
+        terminal.draw(|frame| self.render(frame))?;
+        Ok(())
+    }
+
+    /// Adds wall time to the clock only while actively recording.
+    fn advance_recorded_time(&mut self) {
+        let now = Instant::now();
+        let delta = now - self.tick;
+        self.tick = now;
+        if matches!(
+            self.state,
+            CaptureState::Recording | CaptureState::Previewing
+        ) && !self.paused.load(Ordering::Relaxed)
+        {
+            self.recorded += delta;
+        }
+    }
+
+    /// Applies all pending backend events without waiting for another event.
+    fn drain_video_events(&mut self, events: &Receiver<VideoEvent>) {
+        for event in events.try_iter() {
+            match event {
+                VideoEvent::Started {
+                    width,
+                    height,
+                    fps,
+                    sample_rate,
+                    capture_ready_ms,
+                } => {
+                    self.width = width;
+                    self.height = height;
+                    self.fps = fps;
+                    self.sample_rate = sample_rate;
+                    self.capture_ready_ms = Some(capture_ready_ms);
+                    self.state = CaptureState::Recording;
+                }
+                VideoEvent::Notice(message) => self.notice = Some(message),
+                VideoEvent::Finalizing => self.state = CaptureState::Finalizing,
+                VideoEvent::Saved(_) => {}
+            }
+        }
+    }
+
+    /// Routes one terminal event to recorder controls or overlays.
+    fn handle_event(&mut self, event: Event) {
+        let Event::Key(key) = event else {
+            return;
+        };
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return;
+        }
+        if matches!(key.code, KeyCode::Char('c' | 'C'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.request_stop();
+            return;
+        }
+        if self.show_help {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
+                self.show_help = false;
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Char('s' | 'S' | 'q' | 'Q') | KeyCode::Esc => self.request_stop(),
+            KeyCode::Char(' ')
+                if matches!(self.state, CaptureState::Recording | CaptureState::Paused) =>
+            {
+                let paused = !self.paused.load(Ordering::Relaxed);
+                self.paused.store(paused, Ordering::Relaxed);
+                self.state = if paused {
+                    CaptureState::Paused
+                } else {
+                    CaptureState::Recording
+                };
+            }
+            KeyCode::Char('?') => self.show_help = true,
+            _ => {}
+        }
+    }
+
+    /// Requests MP4 finalization and exits the live view.
+    fn request_stop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.state = CaptureState::Finalizing;
+    }
+
+    /// Draws the header, live status panel, footer, and any overlay.
+    fn render(&mut self, frame: &mut Frame) {
+        let area = frame.area();
+        let layout = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(6),
+            Constraint::Length(3),
+        ])
+        .split(area);
+        self.render_header(frame, layout[0]);
+        self.render_status(frame, layout[1]);
+        self.render_footer(frame, layout[2]);
+        if self.show_help {
+            self.render_help(frame, centered(area, 62, 12));
+        }
+    }
+
+    /// Draws capture state, elapsed time, and the encoded format.
+    fn render_header(&self, frame: &mut Frame, area: Rect) {
+        let (status, color) = match self.state {
+            CaptureState::Starting => ("● STARTING", AMBER),
+            CaptureState::Recording => ("● RECORDING", RED),
+            CaptureState::Paused => ("Ⅱ PAUSED", AMBER),
+            CaptureState::Previewing => ("▶ RECORDING", RED),
+            CaptureState::Finalizing => ("◌ FINALIZING", AMBER),
+        };
+        let title = TextLine::from(vec![
+            Span::styled(" record ", Style::default().fg(RED).bold()),
+            Span::styled("SCREEN CAPTURE", Style::default().fg(MUTED)),
+        ]);
+        let geometry = if self.width > 0 {
+            format!("{}x{} @ {} fps", self.width, self.height, self.fps)
+        } else {
+            "preparing encoder".to_owned()
+        };
+        let header = Paragraph::new(TextLine::from(vec![
+            Span::styled(status, Style::default().fg(color).bold()),
+            Span::raw(format!("   {}   ", format_clock(self.recorded))),
+            Span::styled(
+                format!("{geometry} · H.264 + AAC"),
+                Style::default().fg(MUTED),
+            ),
+        ]))
+        .block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(BORDER))
+                .title(title),
         )
+        .alignment(Alignment::Center);
+        frame.render_widget(header, area);
+    }
+
+    /// Draws the centered live panel with timing and backend feedback.
+    fn render_status(&self, frame: &mut Frame, area: Rect) {
+        let mut lines = vec![
+            TextLine::from(Span::styled(
+                format_clock(self.recorded),
+                Style::default().fg(Color::White).bold(),
+            )),
+            TextLine::from(""),
+            TextLine::from(vec![
+                Span::styled(" OUTPUT   ", Style::default().fg(MUTED)),
+                Span::styled(
+                    compact_path(
+                        &self.output,
+                        usize::from(area.width.saturating_sub(12)).max(8),
+                    ),
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            TextLine::from(vec![
+                Span::styled(" AUDIO    ", Style::default().fg(MUTED)),
+                Span::raw(format!("{} kHz stereo AAC", self.sample_rate / 1_000)),
+            ]),
+        ];
+        if let Some(ready) = self.capture_ready_ms {
+            lines.push(TextLine::from(vec![
+                Span::styled(" READY IN ", Style::default().fg(MUTED)),
+                Span::raw(format!("{ready:.0} ms")),
+            ]));
+        }
+        if let Some(notice) = &self.notice {
+            lines.push(TextLine::from(""));
+            lines.push(TextLine::from(Span::styled(
+                notice.clone(),
+                Style::default().fg(AMBER),
+            )));
+        }
+        let panel_block = panel(" LIVE ", PURPLE);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .alignment(Alignment::Center)
+                .block(panel_block),
+            area,
+        );
+    }
+
+    /// Draws controls and the compact output path.
+    fn render_footer(&self, frame: &mut Frame, area: Rect) {
+        let compact = area.width < 96;
+        let footer = Paragraph::new(vec![TextLine::from(vec![
+            Span::styled(" Ctrl+C / S ", Style::default().fg(RED).bold()),
+            Span::styled(
+                if compact { "stop   " } else { "save & stop   " },
+                Style::default().fg(MUTED),
+            ),
+            Span::styled(" Space ", Style::default().fg(AMBER).bold()),
+            Span::styled("pause   ", Style::default().fg(MUTED)),
+            Span::styled(" ? ", Style::default().fg(CYAN).bold()),
+            Span::styled("help", Style::default().fg(MUTED)),
+        ])])
+        .block(
+            Block::new()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(BORDER)),
+        );
+        frame.render_widget(footer, area);
+    }
+
+    /// Draws the screen-capture help overlay.
+    fn render_help(&self, frame: &mut Frame, area: Rect) {
+        let help = Paragraph::new(vec![
+            TextLine::from("Screen capture records the primary monitor and system audio."),
+            TextLine::from(""),
+            help_line("Ctrl+C / S / Q / Esc", "finalize the MP4 and exit"),
+            help_line("Space", "pause or resume (paused time is omitted)"),
+            help_line("? / Esc", "close this help"),
+            TextLine::from(""),
+            TextLine::from(Span::styled(
+                "The MP4 finalizes on exit; keep the terminal open until it saves.",
+                Style::default().fg(MUTED),
+            )),
+        ])
+        .wrap(Wrap { trim: true })
+        .block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(PURPLE))
+                .padding(Padding::uniform(1))
+                .title(TextLine::from(" SCREEN HELP ").fg(PURPLE).bold()),
+        );
+        frame.render_widget(Clear, area);
+        frame.render_widget(help, area);
     }
 }
 
@@ -1326,6 +1641,17 @@ fn waveform_points(samples: &VecDeque<f32>, maximum: usize) -> Vec<(f64, f64)> {
         .enumerate()
         .map(|(index, sample)| (index as f64, f64::from(*sample)))
         .collect()
+}
+
+/// Formats a duration as an hours, minutes, and seconds clock.
+fn format_clock(duration: Duration) -> String {
+    let total = duration.as_secs();
+    format!(
+        "{:02}:{:02}:{:02}",
+        total / 3_600,
+        total / 60 % 60,
+        total % 60
+    )
 }
 
 /// Creates the common rounded panel style.
@@ -1606,5 +1932,158 @@ mod tests {
             waveform_points(&VecDeque::new(), 0),
             vec![(0.0, 0.0), (1.0, 0.0)]
         );
+    }
+
+    fn video_app() -> VideoApp {
+        VideoApp::new(
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            PathBuf::from("recording-20260821-005218.mp4"),
+        )
+    }
+
+    fn press_video(app: &mut VideoApp, code: KeyCode, modifiers: KeyModifiers) {
+        app.handle_event(Event::Key(KeyEvent::new(code, modifiers)));
+    }
+
+    fn start_recording(app: &mut VideoApp) {
+        let (sender, receiver) = bounded(8);
+        sender
+            .send(VideoEvent::Started {
+                width: 2560,
+                height: 1440,
+                fps: 60,
+                sample_rate: 48_000,
+                capture_ready_ms: 148.0,
+            })
+            .unwrap();
+        app.drain_video_events(&receiver);
+    }
+
+    #[test]
+    fn video_started_event_activates_recording_state() {
+        let mut app = video_app();
+        assert_eq!(app.width, 0);
+        start_recording(&mut app);
+        assert!(matches!(app.state, CaptureState::Recording));
+        assert_eq!(app.width, 2560);
+        assert_eq!(app.height, 1440);
+        assert_eq!(app.fps, 60);
+        assert_eq!(app.sample_rate, 48_000);
+        assert_eq!(app.capture_ready_ms, Some(148.0));
+    }
+
+    #[test]
+    fn video_notice_and_finalizing_events_update_state() {
+        let mut app = video_app();
+        let (sender, receiver) = bounded(8);
+        sender
+            .send(VideoEvent::Notice("duplication reset".to_owned()))
+            .unwrap();
+        sender.send(VideoEvent::Finalizing).unwrap();
+        app.drain_video_events(&receiver);
+        assert_eq!(app.notice.as_deref(), Some("duplication reset"));
+        assert!(matches!(app.state, CaptureState::Finalizing));
+    }
+
+    #[test]
+    fn video_space_toggles_pause() {
+        let mut app = video_app();
+        start_recording(&mut app);
+        press_video(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert!(app.paused.load(Ordering::Relaxed));
+        assert!(matches!(app.state, CaptureState::Paused));
+        press_video(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert!(!app.paused.load(Ordering::Relaxed));
+        assert!(matches!(app.state, CaptureState::Recording));
+    }
+
+    #[test]
+    fn video_clock_freezes_while_paused() {
+        let mut app = video_app();
+        start_recording(&mut app);
+        app.tick -= Duration::from_secs(5);
+        app.advance_recorded_time();
+        assert!(app.recorded >= Duration::from_secs(4));
+        let frozen = app.recorded;
+        press_video(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        app.tick -= Duration::from_secs(10);
+        app.advance_recorded_time();
+        assert_eq!(app.recorded, frozen);
+    }
+
+    #[test]
+    fn video_stop_keys_finalize_capture() {
+        let mut app = video_app();
+        start_recording(&mut app);
+        press_video(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(app.stop.load(Ordering::Relaxed));
+        assert!(matches!(app.state, CaptureState::Finalizing));
+
+        let mut app = video_app();
+        press_video(
+            &mut app,
+            KeyCode::Char('C'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert!(app.stop.load(Ordering::Relaxed));
+
+        let mut app = video_app();
+        press_video(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn video_help_overlay_opens_and_closes() {
+        let mut app = video_app();
+        press_video(&mut app, KeyCode::Char('?'), KeyModifiers::NONE);
+        assert!(app.show_help);
+        press_video(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn video_view_renders_the_screen_capture_ui() {
+        let mut app = video_app();
+        start_recording(&mut app);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(content.contains("SCREEN CAPTURE"));
+        assert!(content.contains("RECORDING"));
+        assert!(content.contains("2560x1440 @ 60 fps"));
+        assert!(content.contains("Space"));
+        assert!(content.contains(".mp4"));
+    }
+
+    #[test]
+    fn video_view_before_start_shows_the_preparing_state() {
+        let mut app = video_app();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(content.contains("STARTING"));
+        assert!(content.contains("preparing encoder"));
+    }
+
+    #[test]
+    fn clock_formats_hours_minutes_and_seconds() {
+        assert_eq!(format_clock(Duration::ZERO), "00:00:00");
+        assert_eq!(format_clock(Duration::from_secs(61)), "00:01:01");
+        assert_eq!(format_clock(Duration::from_secs(3_661)), "01:01:01");
     }
 }

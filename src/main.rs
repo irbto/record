@@ -32,7 +32,7 @@ use record_tui::{
     session::{OutputTarget, create_session_directory, mp3_output_path},
     tui,
     video::{
-        CropRect, FitMode, VideoConfig, VideoEvent, VideoSource, canvas_presets,
+        CropRect, FitMode, VideoConfig, VideoEvent, VideoSource, VideoSummary, canvas_presets,
         check_video_support, enumerate_monitors, record_video, video_timestamp,
     },
 };
@@ -150,7 +150,7 @@ fn run_video(cli: Cli, _launched_at: Instant) -> Result<()> {
         duration,
         force,
         setup,
-        no_tui: _unused_no_tui,
+        no_tui,
     }) = cli.command
     else {
         unreachable!("run_video is only called for the video command");
@@ -328,21 +328,55 @@ fn run_video(cli: Cli, _launched_at: Instant) -> Result<()> {
         .name("record-video".to_owned())
         .spawn(move || record_video(config, &event_sender))
         .context("could not start the video thread")?;
-    eprintln!("● Recording screen → {}", output.display());
-    eprintln!("  Press Ctrl+C to stop and save.");
-    let summary = loop {
-        if worker.is_finished() {
-            break worker.join().map_err(|panic| {
-                if let Some(message) = panic.downcast_ref::<&str>() {
-                    anyhow!("video thread panicked: {message}")
-                } else if let Some(message) = panic.downcast_ref::<String>() {
-                    anyhow!("video thread panicked: {message}")
-                } else {
-                    anyhow!("video thread panicked")
-                }
-            })??;
+    let use_tui = !no_tui && io::stdout().is_terminal() && io::stdin().is_terminal();
+    if use_tui {
+        tui::run_video(
+            &event_receiver,
+            &worker,
+            Arc::clone(&stop),
+            Arc::clone(&paused),
+            output.clone(),
+        )?;
+    } else {
+        run_video_headless(&event_receiver, &worker, &stop)?;
+    }
+    let summary = worker.join().map_err(|panic| {
+        if let Some(message) = panic.downcast_ref::<&str>() {
+            anyhow!("video thread panicked: {message}")
+        } else if let Some(message) = panic.downcast_ref::<String>() {
+            anyhow!("video thread panicked: {message}")
+        } else {
+            anyhow!("video thread panicked")
         }
-        if let Ok(event) = event_receiver.try_recv() {
+    })??;
+    println!(
+        "  {:.1}s · {}x{} @ {} fps · H.264 {} Mbps + AAC {} kbps",
+        summary.duration().as_secs_f64(),
+        summary.width,
+        summary.height,
+        summary.fps,
+        summary.video_bitrate / 1_000_000,
+        summary.audio_bitrate / 1_000
+    );
+    if let Some(ready) = summary.recording_ready_ms {
+        println!(
+            "  capture ready {ready:.1} ms · finalized in {:.1} ms",
+            summary.finalize_ms
+        );
+    }
+    Ok(())
+}
+
+/// Reports capture progress when the full-screen terminal is unavailable.
+fn run_video_headless(
+    events: &Receiver<VideoEvent>,
+    worker: &thread::JoinHandle<Result<VideoSummary>>,
+    stop: &AtomicBool,
+) -> Result<()> {
+    eprintln!("● Recording screen");
+    eprintln!("  Press Ctrl+C to stop and save.");
+    while !worker.is_finished() {
+        if let Ok(event) = events.try_recv() {
             match event {
                 VideoEvent::Started {
                     width,
@@ -363,23 +397,8 @@ fn run_video(cli: Cli, _launched_at: Instant) -> Result<()> {
             eprint!("  Finalizing MP4...");
         }
         std::thread::sleep(Duration::from_millis(33));
-    };
-    println!("✓ Saved {}", output_link(&summary.output));
-    println!(
-        "  {:.1}s · {}x{} @ {} fps · H.264 {} Mbps + AAC {} kbps",
-        summary.duration().as_secs_f64(),
-        summary.width,
-        summary.height,
-        summary.fps,
-        summary.video_bitrate / 1_000_000,
-        summary.audio_bitrate / 1_000
-    );
-    if let Some(ready) = summary.recording_ready_ms {
-        println!(
-            "  capture ready {ready:.1} ms · finalized in {:.1} ms",
-            summary.finalize_ms
-        );
     }
+    eprintln!();
     Ok(())
 }
 /// Reports capture progress when full-screen terminal control is not available.
