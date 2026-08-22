@@ -70,6 +70,10 @@ fn main() -> Result<()> {
         return run_video(cli, launched_at);
     }
 
+    if let Some(Command::Review { path }) = cli.command {
+        return run_review(path);
+    }
+
     let target = output_target(
         cli.output.as_deref(),
         cli.force,
@@ -134,6 +138,23 @@ fn main() -> Result<()> {
     })??;
     print_summary(&summary);
     Ok(())
+}
+
+/// Runs the `record review` player for one finalized MP4 file.
+fn run_review(path: PathBuf) -> Result<()> {
+    if !path.exists() {
+        bail!("could not find {}", path.display());
+    }
+    if path
+        .extension()
+        .is_some_and(|extension| !extension.eq_ignore_ascii_case("mp4"))
+    {
+        bail!("review expects an .mp4 file");
+    }
+    if !(io::stdout().is_terminal() && io::stdin().is_terminal()) {
+        bail!("review needs an interactive terminal");
+    }
+    record_tui::review::run(path)
 }
 
 /// Runs the `record video` command with its own pipeline and headless output.

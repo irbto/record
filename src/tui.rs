@@ -48,13 +48,13 @@ use crate::{
     waveform::Waveform,
 };
 
-const CYAN: Color = Color::Rgb(65, 214, 224);
-const GREEN: Color = Color::Rgb(72, 214, 147);
-const RED: Color = Color::Rgb(247, 75, 103);
-const AMBER: Color = Color::Rgb(244, 183, 73);
-const PURPLE: Color = Color::Rgb(172, 122, 255);
-const MUTED: Color = Color::Rgb(126, 139, 158);
-const BORDER: Color = Color::Rgb(55, 65, 82);
+pub(crate) const CYAN: Color = Color::Rgb(65, 214, 224);
+pub(crate) const GREEN: Color = Color::Rgb(72, 214, 147);
+pub(crate) const RED: Color = Color::Rgb(247, 75, 103);
+pub(crate) const AMBER: Color = Color::Rgb(244, 183, 73);
+pub(crate) const PURPLE: Color = Color::Rgb(172, 122, 255);
+pub(crate) const MUTED: Color = Color::Rgb(126, 139, 158);
+pub(crate) const BORDER: Color = Color::Rgb(55, 65, 82);
 
 #[derive(Clone, Copy, Debug, Default)]
 /// Selects the live visualization arrangement.
@@ -1644,7 +1644,7 @@ fn waveform_points(samples: &VecDeque<f32>, maximum: usize) -> Vec<(f64, f64)> {
 }
 
 /// Formats a duration as an hours, minutes, and seconds clock.
-fn format_clock(duration: Duration) -> String {
+pub(crate) fn format_clock(duration: Duration) -> String {
     let total = duration.as_secs();
     format!(
         "{:02}:{:02}:{:02}",
@@ -1655,7 +1655,7 @@ fn format_clock(duration: Duration) -> String {
 }
 
 /// Creates the common rounded panel style.
-fn panel(title: &str, color: Color) -> Block<'_> {
+pub(crate) fn panel(title: &str, color: Color) -> Block<'_> {
     Block::new()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1693,7 +1693,7 @@ fn help_line(key: &'static str, description: &'static str) -> TextLine<'static> 
 }
 
 /// Centers a rectangle and clamps it to the terminal area.
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
+pub(crate) fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let horizontal = Layout::horizontal([Constraint::Length(width.min(area.width))])
         .flex(Flex::Center)
         .split(area)[0];
@@ -1703,7 +1703,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 /// Keeps the end of a path within a display-width character limit.
-fn compact_path(path: &Path, maximum: usize) -> String {
+pub(crate) fn compact_path(path: &Path, maximum: usize) -> String {
     if maximum == 0 {
         return String::new();
     }

@@ -15,6 +15,8 @@ pub mod audio;
 pub mod cli;
 /// Named clip selection, preview, and trimming.
 pub mod clip;
+/// Standalone review player for finished MP4 recordings.
+pub mod review;
 /// Session directory, part, and clip naming rules.
 pub mod session;
 /// Bounded FFT data for the spectrum display.

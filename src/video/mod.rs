@@ -67,6 +67,9 @@ use crate::audio::windows::{
     ComGuard, Converter, MediaFoundationGuard, SourceFormat, default_audio_client,
 };
 
+/// MP4 frame decoding and half-block preview rendering for review screens.
+pub mod preview;
+
 /// Maximum device-position gap that becomes inserted silence.
 const MAX_GAP_SECONDS: u64 = 5;
 

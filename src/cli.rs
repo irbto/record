@@ -155,6 +155,12 @@ pub enum Command {
         #[arg(long)]
         no_tui: bool,
     },
+    /// Scrub through a finished MP4 recording with the half-block preview.
+    Review {
+        /// MP4 file to open in the review player.
+        #[arg(value_name = "FILE")]
+        path: PathBuf,
+    },
 }
 
 /// Parses a duration in seconds.
