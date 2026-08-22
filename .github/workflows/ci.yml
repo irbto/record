@@ -16,7 +16,7 @@ jobs:
     name: Windows
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
       - name: Format
@@ -57,7 +57,7 @@ jobs:
     name: Rust 1.88
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install MSRV
         run: rustup toolchain install 1.88.0 --profile minimal
       - name: Check minimum supported Rust
@@ -67,7 +67,7 @@ jobs:
     name: Portable core
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal
       - name: Check non-Windows fallback
