@@ -62,3 +62,34 @@ jobs:
         run: rustup toolchain install 1.88.0 --profile minimal
       - name: Check minimum supported Rust
         run: cargo +1.88.0 check --locked --all-targets
+
+  release-tag:
+    name: Tag release
+    needs: [windows, msrv]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Create version tag when missing
+        shell: bash
+        run: |
+          VERSION="$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f 2)"
+          if [ -z "$VERSION" ]; then
+            echo "::error::could not read the package version from Cargo.toml"
+            exit 1
+          fi
+          TAG="v$VERSION"
+          echo "package version $VERSION -> $TAG"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::notice::$TAG already exists on the remote; skipping"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "record $TAG"
+          git push origin "$TAG"
+          echo "::notice::pushed $TAG; the Release workflow will publish the exe"
