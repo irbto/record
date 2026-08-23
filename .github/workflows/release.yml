@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Tags pushed with GITHUB_TOKEN do not start another workflow. Run after a
+  # successful main-branch CI build as well so CI-created tags are published.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: write
@@ -12,16 +18,57 @@ env:
 
 jobs:
   windows:
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'push' && github.ref || github.event.workflow_run.head_sha }}
+      - name: Resolve release tag
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq "push") {
+            $tag = $env:GITHUB_REF_NAME
+          } else {
+            $versionLine = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+            if (-not $versionLine) {
+              throw "Could not read the package version from Cargo.toml"
+            }
+            $tag = "v$($versionLine.Matches[0].Groups[1].Value)"
+          }
+
+          git rev-parse --verify "refs/tags/$tag" | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Expected release tag $tag to exist"
+          }
+
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            "exists=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Output "::notice::$tag is already published; skipping"
+          } else {
+            "exists=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            git checkout --detach $tag
+          }
       - name: Install Rust
+        if: steps.release.outputs.exists != 'true'
         run: rustup toolchain install stable --profile minimal
       - name: Test
+        if: steps.release.outputs.exists != 'true'
         run: cargo test --locked --all-targets
       - name: Build
+        if: steps.release.outputs.exists != 'true'
         run: cargo build --locked --release
       - name: Package
+        if: steps.release.outputs.exists != 'true'
         shell: pwsh
         run: |
           $name = "record-x86_64-pc-windows-msvc"
@@ -34,9 +81,11 @@ jobs:
           "$exeHash  record.exe" | Set-Content -NoNewline "dist/record.exe.sha256"
           "$hash  $name.zip" | Set-Content -NoNewline "dist/$name.zip.sha256"
       - name: Publish GitHub release
+        if: steps.release.outputs.exists != 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           $name = "record-x86_64-pc-windows-msvc"
-          gh release create $env:GITHUB_REF_NAME "dist/record.exe" "dist/record.exe.sha256" "dist/$name.zip" "dist/$name.zip.sha256" --generate-notes --verify-tag
+          gh release create $env:RELEASE_TAG "dist/record.exe" "dist/record.exe.sha256" "dist/$name.zip" "dist/$name.zip.sha256" --generate-notes --verify-tag
