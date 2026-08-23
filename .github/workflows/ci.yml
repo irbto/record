@@ -54,14 +54,14 @@ jobs:
         run: cargo build --release
 
   msrv:
-    name: Rust 1.88
+    name: Rust 1.90
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - name: Install MSRV
-        run: rustup toolchain install 1.88.0 --profile minimal
+        run: rustup toolchain install 1.90.0 --profile minimal
       - name: Check minimum supported Rust
-        run: cargo +1.88.0 check --all-targets
+        run: cargo +1.90.0 check --all-targets
 
   release-tag:
     name: Tag release

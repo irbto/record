@@ -70,10 +70,6 @@ fn main() -> Result<()> {
         return run_video(cli, launched_at);
     }
 
-    if let Some(Command::Review { path }) = cli.command {
-        return run_review(path);
-    }
-
     let target = output_target(
         cli.output.as_deref(),
         cli.force,
@@ -138,23 +134,6 @@ fn main() -> Result<()> {
     })??;
     print_summary(&summary);
     Ok(())
-}
-
-/// Runs the `record review` player for one finalized MP4 file.
-fn run_review(path: PathBuf) -> Result<()> {
-    if !path.exists() {
-        bail!("could not find {}", path.display());
-    }
-    if path
-        .extension()
-        .is_some_and(|extension| !extension.eq_ignore_ascii_case("mp4"))
-    {
-        bail!("review expects an .mp4 file");
-    }
-    if !(io::stdout().is_terminal() && io::stdin().is_terminal()) {
-        bail!("review needs an interactive terminal");
-    }
-    record_tui::review::run(path)
 }
 
 /// Runs the `record video` command with its own pipeline and headless output.
@@ -325,7 +304,9 @@ fn run_video(cli: Cli, _launched_at: Instant) -> Result<()> {
             .read_line(&mut input)
             .context("could not read Enter")?;
     }
+    let use_tui = !no_tui && io::stdout().is_terminal() && io::stdin().is_terminal();
     let (event_sender, event_receiver) = bounded(64);
+    let (preview_sender, preview_receiver) = bounded(1);
     let config = VideoConfig {
         source: if monitor_index == 0 {
             VideoSource::Primary
@@ -347,21 +328,22 @@ fn run_video(cli: Cli, _launched_at: Instant) -> Result<()> {
     };
     let worker = thread::Builder::new()
         .name("record-video".to_owned())
-        .spawn(move || record_video(config, &event_sender))
+        .spawn(move || record_video(config, &event_sender, use_tui.then_some(&preview_sender)))
         .context("could not start the video thread")?;
-    let use_tui = !no_tui && io::stdout().is_terminal() && io::stdin().is_terminal();
-    if use_tui {
+    let edited_summary = if use_tui {
         tui::run_video(
             &event_receiver,
+            &preview_receiver,
             &worker,
             Arc::clone(&stop),
             Arc::clone(&paused),
             output.clone(),
-        )?;
+        )?
     } else {
         run_video_headless(&event_receiver, &worker, &stop)?;
-    }
-    let summary = worker.join().map_err(|panic| {
+        None
+    };
+    let recorded_summary = worker.join().map_err(|panic| {
         if let Some(message) = panic.downcast_ref::<&str>() {
             anyhow!("video thread panicked: {message}")
         } else if let Some(message) = panic.downcast_ref::<String>() {
@@ -370,6 +352,7 @@ fn run_video(cli: Cli, _launched_at: Instant) -> Result<()> {
             anyhow!("video thread panicked")
         }
     })??;
+    let summary = edited_summary.unwrap_or(recorded_summary);
     println!(
         "  {:.1}s · {}x{} @ {} fps · H.264 {} Mbps + AAC {} kbps",
         summary.duration().as_secs_f64(),
