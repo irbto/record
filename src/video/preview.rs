@@ -1,13 +1,10 @@
-//! MP4 frame decoding and half-block preview rendering.
+//! Native MP4 frame decoding for raster previews and frame selection.
 //!
 //! A helper thread opens the finalized MP4 with the native Media Foundation
 //! Source Reader, decodes H.264 pictures to RGB, downsamples them to a
 //! bounded size, and ships them across a bounded channel. The terminal
-//! thread never blocks on decode work.
-//! [`crate::video::preview::HalfblockImage`] paints one decoded picture into
-//! two pixel rows per character cell using the Unicode upper half block with
-//! foreground and background colors, so previews work in every terminal
-//! without graphics protocols or extra dependencies.
+//! thread never blocks on decode work; the raster module presents these
+//! pictures through the terminal's graphics protocol.
 
 use std::{
     os::windows::ffi::OsStrExt,
@@ -18,12 +15,6 @@ use std::{
 
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
-use ratatui::{
-    buffer::Buffer,
-    layout::{Position, Rect},
-    style::Color,
-    widgets::Widget,
-};
 use windows::{
     Win32::{
         Media::MediaFoundation::{
@@ -61,7 +52,7 @@ pub struct PreviewFormat {
     pub duration: Duration,
 }
 
-/// Contains one downsampled BGRA picture ready for half-block rendering.
+/// Contains one downsampled BGRA picture ready for raster rendering.
 pub struct PreviewFrame {
     /// Packed BGRA bytes in top-down rows of exactly `width` pixels.
     pub bgra: Vec<u8>,
@@ -100,14 +91,18 @@ pub enum PreviewEvent {
 /// for one MP4 file. Dropping the command sender stops the worker.
 pub fn spawn_preview_worker(
     path: PathBuf,
-) -> Result<(Sender<PreviewCommand>, Receiver<PreviewEvent>)> {
+) -> Result<(
+    Sender<PreviewCommand>,
+    Receiver<PreviewEvent>,
+    thread::JoinHandle<()>,
+)> {
     let (commands, command_receiver) = bounded(8);
     let (event_sender, events) = bounded(2);
-    thread::Builder::new()
+    let worker = thread::Builder::new()
         .name("record-video-preview".to_owned())
         .spawn(move || run_reader(&path, &command_receiver, &event_sender))
         .context("could not start the video preview thread")?;
-    Ok((commands, events))
+    Ok((commands, events, worker))
 }
 
 /// Opens the file, announces its format, and serves commands until close.
@@ -484,97 +479,10 @@ fn resize_bgra_to_preview(source: &[u8], width: u32, height: u32) -> Vec<u8> {
     )
 }
 
-/// Computes the letterboxed cell rectangle that preserves the frame aspect.
-///
-/// Half-block cells cover one pixel column and two pixel rows, which matches
-/// the common 1:2 terminal font ratio. The result is centered inside `area`.
-pub(crate) fn letterbox_rect(frame_width: u32, frame_height: u32, area: Rect) -> Rect {
-    if area.is_empty() || frame_width == 0 || frame_height == 0 {
-        return Rect::ZERO;
-    }
-    let cell_pixels = u32::from(area.height) * 2;
-    let scale_x = f64::from(area.width) / f64::from(frame_width);
-    let scale_y = f64::from(cell_pixels) / f64::from(frame_height);
-    let scale = scale_x.min(scale_y);
-    let display_width = ((frame_width as f64 * scale).round() as u16).clamp(1, area.width);
-    let display_height =
-        (((frame_height as f64 * scale) / 2.0).ceil() as u16).clamp(1, area.height);
-    Rect {
-        x: area.x + (area.width - display_width) / 2,
-        y: area.y + (area.height - display_height) / 2,
-        width: display_width,
-        height: display_height,
-    }
-}
-
-/// Paints one decoded picture as two pixel rows per character cell.
-pub struct HalfblockImage<'a> {
-    frame: &'a PreviewFrame,
-}
-
-impl<'a> HalfblockImage<'a> {
-    /// Wraps one decoded picture for rendering.
-    #[must_use]
-    pub fn new(frame: &'a PreviewFrame) -> Self {
-        Self { frame }
-    }
-}
-
-impl Widget for HalfblockImage<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let fit = letterbox_rect(self.frame.width, self.frame.height, area);
-        if fit.is_empty() {
-            return;
-        }
-        let columns = usize::from(fit.width);
-        let display_rows = usize::from(fit.height) * 2;
-        let grid = resize_bgra(
-            &self.frame.bgra,
-            self.frame.width,
-            self.frame.height,
-            fit.width as u32,
-            display_rows as u32,
-        );
-        for row in 0..usize::from(fit.height) {
-            for column in 0..columns {
-                let top = grid_pixel(&grid, columns, display_rows, column, row * 2);
-                let bottom = grid_pixel(&grid, columns, display_rows, column, row * 2 + 1);
-                let position = Position::new(fit.x + column as u16, fit.y + row as u16);
-                if let Some(cell) = buf.cell_mut(position) {
-                    cell.set_symbol("\u{2580}");
-                    cell.set_fg(top);
-                    cell.set_bg(bottom);
-                }
-            }
-        }
-    }
-}
-
-/// Reads one averaged display-grid pixel as a terminal color.
-fn grid_pixel(grid: &[u8], columns: usize, rows: usize, x: usize, y: usize) -> Color {
-    let y = y.min(rows.saturating_sub(1));
-    let offset = (y * columns + x.min(columns.saturating_sub(1))) * 4;
-    Color::Rgb(grid[offset + 2], grid[offset + 1], grid[offset])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::video::{Mp4Writer, Nv12Frame, check_video_support};
-    use ratatui::{Terminal, backend::TestBackend};
-
-    fn solid_frame(width: u32, height: u32, red: u8, green: u8, blue: u8) -> PreviewFrame {
-        let mut bgra = Vec::with_capacity(width as usize * height as usize * 4);
-        for _ in 0..width * height {
-            bgra.extend_from_slice(&[blue, green, red, 255]);
-        }
-        PreviewFrame {
-            bgra,
-            width,
-            height,
-            time: Duration::ZERO,
-        }
-    }
 
     #[test]
     fn resize_keeps_a_uniform_color_uniform() {
@@ -599,63 +507,6 @@ mod tests {
         let resized = resize_bgra(&source, 2, 2, 1, 1);
         assert_eq!(&resized[0..3], &[128, 128, 128]);
         assert_eq!(resized[3], 255);
-    }
-
-    #[test]
-    fn letterbox_centers_and_preserves_aspect() {
-        let area = Rect::new(0, 0, 40, 20);
-        let fit = letterbox_rect(100, 50, area);
-        assert_eq!(fit.width, 40);
-        assert_eq!(fit.height, 10);
-        assert_eq!(fit.y, 5);
-        let tall = letterbox_rect(50, 100, Rect::new(0, 0, 40, 20));
-        assert_eq!(tall.width, 20);
-        assert_eq!(tall.height, 20);
-        assert_eq!(tall.x, 10);
-        assert_eq!(tall.y, 0);
-    }
-
-    #[test]
-    fn letterbox_survives_empty_inputs() {
-        assert_eq!(letterbox_rect(0, 10, Rect::new(0, 0, 10, 10)), Rect::ZERO);
-        assert_eq!(letterbox_rect(10, 10, Rect::ZERO), Rect::ZERO);
-    }
-
-    #[test]
-    fn halfblocks_paint_two_pixel_rows_per_cell() {
-        // Left half red, right half black, one pixel tall enough to fill both
-        // rows of every cell with the same color.
-        let mut frame = solid_frame(8, 2, 0, 0, 0);
-        for index in 0..4 {
-            frame.bgra[index * 4..index * 4 + 4].copy_from_slice(&[0, 0, 255, 255]);
-        }
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|ui| ui.render_widget(HalfblockImage::new(&frame), ui.area()))
-            .unwrap();
-        let cell = |x: u16, y: u16| {
-            terminal
-                .backend()
-                .buffer()
-                .cell(Position::new(x, y))
-                .unwrap()
-                .clone()
-        };
-        // The 8x2 frame scales to an 80x10-cell band centered vertically.
-        for y in 7..17u16 {
-            for x in 0..80u16 {
-                assert_eq!(cell(x, y).symbol(), "\u{2580}");
-            }
-        }
-        let left = cell(0, 7);
-        assert_eq!(left.fg, Color::Rgb(255, 0, 0));
-        assert_eq!(left.bg, Color::Rgb(255, 0, 0));
-        let right = cell(70, 7);
-        assert_eq!(right.fg, Color::Rgb(0, 0, 0));
-        assert_eq!(right.bg, Color::Rgb(0, 0, 0));
-        // Cells outside the fitted rectangle stay untouched.
-        assert_eq!(cell(79, 23).symbol(), " ");
     }
 
     #[test]
@@ -739,7 +590,7 @@ mod tests {
         // SAFETY: Finalizes the sink exactly once.
         unsafe { writer.close().unwrap() };
 
-        let (commands, events) = spawn_preview_worker(path).unwrap();
+        let (commands, events, worker) = spawn_preview_worker(path).unwrap();
         let mut format = None;
         while format.is_none() {
             match events.recv_timeout(Duration::from_secs(10)).unwrap() {
@@ -769,5 +620,6 @@ mod tests {
             }
         }
         commands.send(PreviewCommand::Close).unwrap();
+        worker.join().unwrap();
     }
 }

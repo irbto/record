@@ -42,9 +42,16 @@ use crate::{
         ClipSelection, ClipWaveform, PreviewPlayer, SelectionHandle, WaveformBin,
         load_pcm_waveform, trim_clip,
     },
+    raster::RasterRenderer,
     session::{OutputTarget, clip_stem},
     spectrum::Spectrum,
-    video::{VideoEvent, VideoSummary},
+    video::{
+        VideoEvent, VideoSummary,
+        clip::trim_video,
+        preview::{
+            PreviewCommand, PreviewEvent, PreviewFormat, PreviewFrame, spawn_preview_worker,
+        },
+    },
     waveform::Waveform,
 };
 
@@ -112,13 +119,17 @@ pub fn run(
 /// Runs the full-screen screen-capture interface until the video worker stops.
 pub fn run_video(
     events: &Receiver<VideoEvent>,
+    previews: &Receiver<PreviewFrame>,
     worker: &JoinHandle<Result<VideoSummary>>,
     stop: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
     output: PathBuf,
-) -> Result<()> {
+) -> Result<Option<VideoSummary>> {
     let mut app = VideoApp::new(stop, paused, output);
-    ratatui::run(|terminal| app.run(terminal, events, worker))
+    ratatui::run(|terminal| {
+        let raster = RasterRenderer::start()?;
+        app.run(terminal, events, previews, worker, raster)
+    })
 }
 
 #[derive(Debug, Default)]
@@ -1226,6 +1237,40 @@ struct VideoApp {
     recorded: Duration,
     /// Contains the previous loop instant for elapsed accumulation.
     tick: Instant,
+    /// Contains the integrated frame-selection editor after MP4 finalization.
+    editor: Option<VideoEditor>,
+    /// Contains the summary returned to the command after editing completes.
+    completed_summary: Option<VideoSummary>,
+    /// Reports that the editor should close and return to the shell.
+    exit_requested: bool,
+}
+
+/// Owns decoded frame selection and optional replacement work for one MP4.
+struct VideoEditor {
+    /// Contains the file metadata and is updated after a successful trim.
+    summary: VideoSummary,
+    /// Reuses the audio editor's bounded, frame-accurate handle behavior.
+    selection: ClipSelection,
+    /// Sends scrub and playback requests to the native decoder worker.
+    commands: Sender<PreviewCommand>,
+    /// Receives decoded pictures without blocking terminal drawing.
+    events: Receiver<PreviewEvent>,
+    /// Owns the decoder until a trim worker waits for it to release the MP4.
+    decoder: Option<JoinHandle<()>>,
+    /// Contains the stream description announced by Media Foundation.
+    format: Option<PreviewFormat>,
+    /// Contains the timestamp represented by the current raster picture.
+    position: Duration,
+    /// Advances decoded pictures while true.
+    playing: bool,
+    /// Reports whether exactly one decode request is outstanding.
+    awaiting_picture: bool,
+    /// Coalesces repeated handle movement to the newest requested picture.
+    pending_seek: Option<Duration>,
+    /// Contains decoder or trim feedback shown in the editor.
+    error: Option<String>,
+    /// Rebuilds and replaces the MP4 away from the TUI thread.
+    trim_job: Option<JoinHandle<Result<VideoSummary>>>,
 }
 
 impl VideoApp {
@@ -1245,6 +1290,9 @@ impl VideoApp {
             capture_ready_ms: None,
             recorded: Duration::ZERO,
             tick: Instant::now(),
+            editor: None,
+            completed_summary: None,
+            exit_requested: false,
         }
     }
 
@@ -1253,15 +1301,28 @@ impl VideoApp {
         &mut self,
         terminal: &mut DefaultTerminal,
         events: &Receiver<VideoEvent>,
+        previews: &Receiver<PreviewFrame>,
         worker: &JoinHandle<Result<VideoSummary>>,
-    ) -> Result<()> {
+        mut raster: RasterRenderer,
+    ) -> Result<Option<VideoSummary>> {
         loop {
             self.advance_recorded_time();
             self.drain_video_events(events);
-            if worker.is_finished() {
+            if self.editor.is_none()
+                && let Some(preview) = previews.try_iter().last()
+            {
+                raster.set_frame(preview);
+            }
+            self.drain_editor_events(&mut raster);
+            self.poll_video_trim();
+            self.request_editor_picture();
+            if self.exit_requested {
                 break;
             }
-            terminal.draw(|frame| self.render(frame))?;
+            if worker.is_finished() && self.completed_summary.is_none() {
+                break;
+            }
+            terminal.draw(|frame| self.render_with_raster(frame, Some(&mut raster)))?;
             if event::poll(Duration::from_millis(33))? {
                 self.handle_event(event::read()?);
             }
@@ -1270,8 +1331,10 @@ impl VideoApp {
             }
         }
         self.drain_video_events(events);
-        terminal.draw(|frame| self.render(frame))?;
-        Ok(())
+        if let Some(editor) = &self.editor {
+            let _ = editor.commands.try_send(PreviewCommand::Close);
+        }
+        Ok(self.completed_summary.clone())
     }
 
     /// Adds wall time to the clock only while actively recording.
@@ -1308,7 +1371,109 @@ impl VideoApp {
                 }
                 VideoEvent::Notice(message) => self.notice = Some(message),
                 VideoEvent::Finalizing => self.state = CaptureState::Finalizing,
-                VideoEvent::Saved(_) => {}
+                VideoEvent::Saved(summary) => self.open_video_editor(summary),
+            }
+        }
+    }
+
+    /// Opens the finalized MP4 in the same frame-selection workflow.
+    fn open_video_editor(&mut self, summary: VideoSummary) {
+        self.completed_summary = Some(summary.clone());
+        let selection = match ClipSelection::new(0, summary.frames, summary.fps) {
+            Ok(selection) => selection,
+            Err(_) => {
+                self.notice = Some("The recording is too short to edit.".to_owned());
+                self.exit_requested = true;
+                return;
+            }
+        };
+        let (commands, events, decoder) = match spawn_preview_worker(summary.output.clone()) {
+            Ok(worker) => worker,
+            Err(error) => {
+                self.notice = Some(format!("Could not open the video editor: {error:#}"));
+                self.exit_requested = true;
+                return;
+            }
+        };
+        let awaiting_picture = commands
+            .try_send(PreviewCommand::Seek(Duration::ZERO))
+            .is_ok();
+        self.output = summary.output.clone();
+        self.editor = Some(VideoEditor {
+            summary,
+            selection,
+            commands,
+            events,
+            decoder: Some(decoder),
+            format: None,
+            position: Duration::ZERO,
+            playing: false,
+            awaiting_picture,
+            pending_seek: None,
+            error: None,
+            trim_job: None,
+        });
+        self.notice = None;
+        self.show_help = false;
+    }
+
+    /// Applies decoded pictures and failures without waiting on Media Foundation.
+    fn drain_editor_events(&mut self, raster: &mut RasterRenderer) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        for event in editor.events.try_iter() {
+            match event {
+                PreviewEvent::Ready(format) => editor.format = Some(format),
+                PreviewEvent::Frame(frame) => {
+                    editor.awaiting_picture = false;
+                    editor.position = frame.time;
+                    raster.set_frame(*frame);
+                    if editor.playing && editor.position >= selection_end_time(editor) {
+                        editor.playing = false;
+                    }
+                }
+                PreviewEvent::End => {
+                    editor.awaiting_picture = false;
+                    editor.playing = false;
+                }
+                PreviewEvent::Failed(message) => {
+                    editor.awaiting_picture = false;
+                    editor.pending_seek = None;
+                    editor.playing = false;
+                    editor.error = Some(message);
+                }
+            }
+        }
+    }
+
+    /// Keeps at most one sequential decode request in flight during playback.
+    fn request_editor_picture(&mut self) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        if editor.awaiting_picture || editor.error.is_some() || editor.trim_job.is_some() {
+            return;
+        }
+        if let Some(time) = editor.pending_seek.take() {
+            match editor.commands.try_send(PreviewCommand::Seek(time)) {
+                Ok(()) => editor.awaiting_picture = true,
+                Err(TrySendError::Full(_)) => editor.pending_seek = Some(time),
+                Err(TrySendError::Disconnected(_)) => {
+                    editor.error = Some("The video frame decoder stopped.".to_owned());
+                }
+            }
+            return;
+        }
+        if !editor.playing {
+            return;
+        }
+        match editor.commands.try_send(PreviewCommand::Step) {
+            Ok(()) => editor.awaiting_picture = true,
+            Err(TrySendError::Full(_)) => {}
+            Err(TrySendError::Disconnected(_)) => {
+                editor.error = Some("The video frame decoder stopped.".to_owned());
+                editor.playing = false;
             }
         }
     }
@@ -1319,6 +1484,10 @@ impl VideoApp {
             return;
         };
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return;
+        }
+        if self.editor.is_some() {
+            self.handle_video_editor(key);
             return;
         }
         if matches!(key.code, KeyCode::Char('c' | 'C'))
@@ -1357,8 +1526,206 @@ impl VideoApp {
         self.state = CaptureState::Finalizing;
     }
 
+    /// Applies the existing clip-editor controls to video frame boundaries.
+    fn handle_video_editor(&mut self, key: KeyEvent) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        if editor.trim_job.is_some() {
+            return;
+        }
+        if matches!(key.code, KeyCode::Char('c' | 'C'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.close_video_editor();
+            return;
+        }
+        if self.show_help {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
+                self.show_help = false;
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => self.close_video_editor(),
+            KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Tab => {
+                if let Some(editor) = &mut self.editor {
+                    editor.selection.toggle_handle();
+                    editor.error = None;
+                }
+                self.seek_to_active_handle();
+            }
+            KeyCode::Left | KeyCode::Right => {
+                if let Some(editor) = &mut self.editor {
+                    let rate = i64::from(editor.selection.sample_rate());
+                    let step = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        rate
+                    } else if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        1
+                    } else {
+                        (rate / 10).max(1)
+                    };
+                    let direction = if key.code == KeyCode::Left { -1 } else { 1 };
+                    editor.selection.nudge(step * direction);
+                    editor.playing = false;
+                    editor.error = None;
+                }
+                self.seek_to_active_handle();
+            }
+            KeyCode::Char('r' | 'R') | KeyCode::Home => {
+                if let Some(editor) = &mut self.editor {
+                    editor.selection.reset();
+                    editor.playing = false;
+                    editor.error = None;
+                }
+                self.seek_editor(Duration::ZERO);
+            }
+            KeyCode::Char(' ') | KeyCode::Char('p' | 'P') => self.toggle_video_playback(),
+            KeyCode::Enter => self.start_video_trim(),
+            _ => {}
+        }
+    }
+
+    /// Keeps the original MP4 and returns from `record video`.
+    fn close_video_editor(&mut self) {
+        if let Some(editor) = &mut self.editor {
+            editor.playing = false;
+            let _ = editor.commands.try_send(PreviewCommand::Close);
+        }
+        self.exit_requested = true;
+    }
+
+    /// Scrubs to whichever selection boundary currently owns the arrow keys.
+    fn seek_to_active_handle(&mut self) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let frame = match editor.selection.active_handle() {
+            SelectionHandle::Start => editor.selection.start_frame(),
+            SelectionHandle::End => editor.selection.end_frame().saturating_sub(1),
+        };
+        self.seek_editor(frame_time(frame, editor.summary.fps));
+    }
+
+    /// Requests the decoded picture at one exact media position.
+    fn seek_editor(&mut self, time: Duration) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        editor.position = time.min(editor.summary.duration());
+        if editor.awaiting_picture {
+            editor.pending_seek = Some(editor.position);
+            return;
+        }
+        match editor
+            .commands
+            .try_send(PreviewCommand::Seek(editor.position))
+        {
+            Ok(()) => editor.awaiting_picture = true,
+            Err(TrySendError::Full(_)) => editor.pending_seek = Some(editor.position),
+            Err(TrySendError::Disconnected(_)) => {
+                editor.error = Some("The video frame decoder stopped.".to_owned());
+            }
+        }
+    }
+
+    /// Plays decoded pictures only inside the selected range.
+    fn toggle_video_playback(&mut self) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        if editor.error.is_some() {
+            return;
+        }
+        if editor.playing {
+            editor.playing = false;
+            return;
+        }
+        let start = selection_start_time(editor);
+        self.seek_editor(start);
+        if let Some(editor) = &mut self.editor {
+            editor.playing = true;
+        }
+    }
+
+    /// Starts a worker that rebuilds the selected video and audio range.
+    fn start_video_trim(&mut self) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        editor.playing = false;
+        if editor.selection.start_frame() == editor.selection.source_start_frame()
+            && editor.selection.end_frame() == editor.selection.source_end_frame()
+        {
+            self.close_video_editor();
+            return;
+        }
+        let summary = editor.summary.clone();
+        let path = summary.output.clone();
+        let start_frame = editor.selection.start_frame();
+        let end_frame = editor.selection.end_frame();
+        let decoder = editor.decoder.take();
+        match thread::Builder::new()
+            .name("record-video-trim".to_owned())
+            .spawn(move || {
+                if let Some(decoder) = decoder {
+                    decoder
+                        .join()
+                        .map_err(|_| anyhow::anyhow!("the video decoder thread panicked"))?;
+                }
+                trim_video(&path, &summary, start_frame, end_frame)
+            }) {
+            Ok(worker) => {
+                editor.trim_job = Some(worker);
+                editor.error = None;
+                let _ = editor.commands.try_send(PreviewCommand::Close);
+            }
+            Err(error) => {
+                editor.error = Some(format!("Could not start video trim: {error}"));
+            }
+        }
+    }
+
+    /// Applies a completed MP4 replacement or leaves the editor open on failure.
+    fn poll_video_trim(&mut self) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        if !editor
+            .trim_job
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            return;
+        }
+        let worker = editor.trim_job.take().expect("finished video trim exists");
+        match worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("the video trim thread panicked"))
+            .and_then(|result| result)
+        {
+            Ok(summary) => {
+                editor.summary = summary.clone();
+                self.completed_summary = Some(summary);
+                self.exit_requested = true;
+            }
+            Err(error) => editor.error = Some(format!("Video trim failed: {error:#}")),
+        }
+    }
+
     /// Draws the header, live status panel, footer, and any overlay.
+    #[cfg(test)]
     fn render(&mut self, frame: &mut Frame) {
+        self.render_with_raster(frame, None);
+    }
+
+    /// Draws the capture interface with an optional real terminal raster.
+    fn render_with_raster(&mut self, frame: &mut Frame, raster: Option<&mut RasterRenderer>) {
+        if self.editor.is_some() {
+            self.render_video_editor(frame, raster);
+            return;
+        }
         let area = frame.area();
         let layout = Layout::vertical([
             Constraint::Length(3),
@@ -1367,11 +1734,248 @@ impl VideoApp {
         ])
         .split(area);
         self.render_header(frame, layout[0]);
-        self.render_status(frame, layout[1]);
+        self.render_status(frame, layout[1], raster);
         self.render_footer(frame, layout[2]);
         if self.show_help {
             self.render_help(frame, centered(area, 62, 12));
         }
+    }
+
+    /// Draws the integrated frame-selection editor around the raster picture.
+    fn render_video_editor(&mut self, frame: &mut Frame, mut raster: Option<&mut RasterRenderer>) {
+        let area = frame.area();
+        let layout = Layout::vertical([
+            Constraint::Length(4),
+            Constraint::Min(6),
+            Constraint::Length(4),
+            Constraint::Length(3),
+        ])
+        .split(area);
+        self.render_video_editor_header(frame, layout[0]);
+
+        let preview_block = panel(" FRAME PREVIEW ", PURPLE);
+        let preview_area = preview_block.inner(layout[1]);
+        frame.render_widget(preview_block, layout[1]);
+        let rendered = raster
+            .as_deref_mut()
+            .is_some_and(|raster| raster.render(frame, preview_area));
+        if !rendered {
+            let message = self
+                .editor
+                .as_ref()
+                .and_then(|editor| editor.error.as_deref())
+                .or_else(|| raster.as_deref().and_then(RasterRenderer::error))
+                .unwrap_or("Decoding the selected frame");
+            frame.render_widget(
+                Paragraph::new(message).alignment(Alignment::Center).style(
+                    Style::default().fg(
+                        if self
+                            .editor
+                            .as_ref()
+                            .is_some_and(|editor| editor.error.is_some())
+                        {
+                            RED
+                        } else {
+                            MUTED
+                        },
+                    ),
+                ),
+                preview_area,
+            );
+        }
+
+        self.render_video_selection(frame, layout[2]);
+        self.render_video_editor_footer(frame, layout[3]);
+        if self.show_help {
+            self.render_video_editor_help(frame, centered(area, 66, 16));
+        }
+    }
+
+    /// Draws selected bounds, current frame time, and editor state.
+    fn render_video_editor_header(&self, frame: &mut Frame, area: Rect) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let (status, color) = if editor.trim_job.is_some() {
+            ("◌ SAVING TRIM", AMBER)
+        } else if editor.error.is_some() {
+            ("✗ ERROR", RED)
+        } else if editor.playing {
+            ("▶ PLAYING", GREEN)
+        } else {
+            ("Ⅱ SELECTING", PURPLE)
+        };
+        let active = match editor.selection.active_handle() {
+            SelectionHandle::Start => "START",
+            SelectionHandle::End => "END",
+        };
+        let name = editor
+            .summary
+            .output
+            .file_name()
+            .unwrap_or(editor.summary.output.as_os_str())
+            .to_string_lossy();
+        let title = TextLine::from(vec![
+            Span::styled(" record ", Style::default().fg(GREEN).bold()),
+            Span::styled("VIDEO CLIP ", Style::default().fg(MUTED)),
+            Span::styled(name.into_owned(), Style::default().fg(PURPLE)),
+        ]);
+        let header = Paragraph::new(vec![
+            TextLine::from(vec![
+                Span::styled(status, Style::default().fg(color).bold()),
+                Span::raw(format!("   FRAME {}   ", editor_frame(editor))),
+                Span::styled(
+                    format!(
+                        "{}x{} @ {} fps · H.264 + AAC",
+                        editor.summary.width, editor.summary.height, editor.summary.fps
+                    ),
+                    Style::default().fg(MUTED),
+                ),
+            ]),
+            TextLine::from(vec![
+                Span::styled("START ", Style::default().fg(CYAN).bold()),
+                Span::raw(format_clock(selection_start_time(editor))),
+                Span::styled("   END ", Style::default().fg(GREEN).bold()),
+                Span::raw(format_clock(selection_end_time(editor))),
+                Span::styled("   LENGTH ", Style::default().fg(PURPLE).bold()),
+                Span::raw(format_clock(editor.selection.duration())),
+                Span::styled("   ACTIVE ", Style::default().fg(MUTED)),
+                Span::styled(active, Style::default().fg(AMBER).bold()),
+            ]),
+        ])
+        .block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(BORDER))
+                .title(title),
+        )
+        .alignment(Alignment::Center);
+        frame.render_widget(header, area);
+    }
+
+    /// Draws the full source timeline with explicit start and end handles.
+    fn render_video_selection(&self, frame: &mut Frame, area: Rect) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let block = panel(" CLIP RANGE ", CYAN);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.is_empty() {
+            return;
+        }
+        let width = usize::from(inner.width.max(1));
+        let start = ((editor.selection.normalized_start() * width as f64).floor() as usize)
+            .min(width.saturating_sub(1));
+        let end = ((editor.selection.normalized_end() * width as f64).ceil() as usize)
+            .clamp(start + 1, width);
+        let playhead = ((editor_position_ratio(editor) * width as f64).floor() as usize)
+            .min(width.saturating_sub(1));
+        let active_start = editor.selection.active_handle() == SelectionHandle::Start;
+        let spans = (0..width)
+            .map(|column| {
+                if column == playhead {
+                    Span::styled("◆", Style::default().fg(Color::White).bold())
+                } else if column == start {
+                    Span::styled(
+                        "▐",
+                        Style::default()
+                            .fg(if active_start { AMBER } else { CYAN })
+                            .bold(),
+                    )
+                } else if column + 1 == end {
+                    Span::styled(
+                        "▌",
+                        Style::default()
+                            .fg(if active_start { GREEN } else { AMBER })
+                            .bold(),
+                    )
+                } else if (start..end).contains(&column) {
+                    Span::styled("━", Style::default().fg(GREEN))
+                } else {
+                    Span::styled("─", Style::default().fg(BORDER))
+                }
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(TextLine::from(spans)), inner);
+    }
+
+    /// Draws the compact control map and any actionable editor error.
+    fn render_video_editor_footer(&self, frame: &mut Frame, area: Rect) {
+        let error = self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.error.as_deref());
+        let first = if let Some(error) = error {
+            TextLine::from(Span::styled(error.to_owned(), Style::default().fg(RED)))
+        } else {
+            TextLine::from(vec![
+                Span::styled(" Tab ", Style::default().fg(AMBER).bold()),
+                Span::styled("handle   ", Style::default().fg(MUTED)),
+                Span::styled(" ←/→ ", Style::default().fg(CYAN).bold()),
+                Span::styled("0.1s   ", Style::default().fg(MUTED)),
+                Span::styled(" Shift ", Style::default().fg(CYAN).bold()),
+                Span::styled("1s   ", Style::default().fg(MUTED)),
+                Span::styled(" Ctrl ", Style::default().fg(CYAN).bold()),
+                Span::styled("1 frame   ", Style::default().fg(MUTED)),
+                Span::styled(" Space ", Style::default().fg(GREEN).bold()),
+                Span::styled("play", Style::default().fg(MUTED)),
+            ])
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                first,
+                TextLine::from(vec![
+                    Span::styled(" R ", Style::default().fg(CYAN).bold()),
+                    Span::styled("reset   ", Style::default().fg(MUTED)),
+                    Span::styled(" Enter ", Style::default().fg(PURPLE).bold()),
+                    Span::styled("save clip   ", Style::default().fg(MUTED)),
+                    Span::styled(" Esc ", Style::default().fg(RED).bold()),
+                    Span::styled("keep original   ", Style::default().fg(MUTED)),
+                    Span::styled(" ? ", Style::default().fg(AMBER).bold()),
+                    Span::styled("help", Style::default().fg(MUTED)),
+                ]),
+            ])
+            .block(
+                Block::new()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(BORDER)),
+            ),
+            area,
+        );
+    }
+
+    /// Draws integrated editor help without mentioning a review command.
+    fn render_video_editor_help(&self, frame: &mut Frame, area: Rect) {
+        let help = Paragraph::new(vec![
+            TextLine::from("Choose the exact frames to keep in this recording."),
+            TextLine::from(""),
+            help_line("Tab", "switch between the start and end handle"),
+            help_line("← / →", "move the active handle by 0.1 second"),
+            help_line("Shift + ←/→", "move the active handle by one second"),
+            help_line("Ctrl + ←/→", "move the active handle by one frame"),
+            help_line("Space / P", "play or pause the selected frames"),
+            help_line("R / Home", "restore the full recording"),
+            help_line("Enter", "replace the MP4 with the selected range"),
+            help_line("Esc", "keep the original MP4 and finish"),
+            TextLine::from(""),
+            TextLine::from(Span::styled(
+                "Frame decoding and MP4 saving run on background threads.",
+                Style::default().fg(MUTED),
+            )),
+        ])
+        .wrap(Wrap { trim: true })
+        .block(
+            Block::new()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(PURPLE))
+                .padding(Padding::uniform(1))
+                .title(TextLine::from(" VIDEO CLIP HELP ").fg(PURPLE).bold()),
+        );
+        frame.render_widget(Clear, area);
+        frame.render_widget(help, area);
     }
 
     /// Draws capture state, elapsed time, and the encoded format.
@@ -1411,48 +2015,54 @@ impl VideoApp {
         frame.render_widget(header, area);
     }
 
-    /// Draws the centered live panel with timing and backend feedback.
-    fn render_status(&self, frame: &mut Frame, area: Rect) {
-        let mut lines = vec![
-            TextLine::from(Span::styled(
-                format_clock(self.recorded),
-                Style::default().fg(Color::White).bold(),
-            )),
-            TextLine::from(""),
-            TextLine::from(vec![
-                Span::styled(" OUTPUT   ", Style::default().fg(MUTED)),
-                Span::styled(
-                    compact_path(
-                        &self.output,
-                        usize::from(area.width.saturating_sub(12)).max(8),
-                    ),
-                    Style::default().fg(Color::White),
+    /// Draws a Sixel-backed live video surface with one compact status row.
+    fn render_status(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        mut raster: Option<&mut RasterRenderer>,
+    ) {
+        let panel_block = panel(" LIVE VIDEO ", PURPLE);
+        let inner = panel_block.inner(area);
+        frame.render_widget(panel_block, area);
+        let sections = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+
+        let rendered = raster
+            .as_deref_mut()
+            .is_some_and(|raster| raster.render(frame, sections[0]));
+        if !rendered {
+            let message = raster
+                .as_deref()
+                .and_then(RasterRenderer::error)
+                .unwrap_or("waiting for the first desktop frame");
+            frame.render_widget(
+                Paragraph::new(message)
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(MUTED)),
+                sections[0],
+            );
+        }
+
+        let status = self.notice.clone().unwrap_or_else(|| {
+            let ready = self
+                .capture_ready_ms
+                .map(|milliseconds| format!(" · ready {milliseconds:.0} ms"))
+                .unwrap_or_default();
+            format!(
+                "{} · {} kHz AAC{ready}",
+                compact_path(
+                    &self.output,
+                    usize::from(inner.width).saturating_sub(20).max(8)
                 ),
-            ]),
-            TextLine::from(vec![
-                Span::styled(" AUDIO    ", Style::default().fg(MUTED)),
-                Span::raw(format!("{} kHz stereo AAC", self.sample_rate / 1_000)),
-            ]),
-        ];
-        if let Some(ready) = self.capture_ready_ms {
-            lines.push(TextLine::from(vec![
-                Span::styled(" READY IN ", Style::default().fg(MUTED)),
-                Span::raw(format!("{ready:.0} ms")),
-            ]));
-        }
-        if let Some(notice) = &self.notice {
-            lines.push(TextLine::from(""));
-            lines.push(TextLine::from(Span::styled(
-                notice.clone(),
-                Style::default().fg(AMBER),
-            )));
-        }
-        let panel_block = panel(" LIVE ", PURPLE);
+                self.sample_rate / 1_000,
+            )
+        });
+        let color = if self.notice.is_some() { AMBER } else { MUTED };
         frame.render_widget(
-            Paragraph::new(lines)
+            Paragraph::new(status)
                 .alignment(Alignment::Center)
-                .block(panel_block),
-            area,
+                .style(Style::default().fg(color)),
+            sections[1],
         );
     }
 
@@ -1641,6 +2251,40 @@ fn waveform_points(samples: &VecDeque<f32>, maximum: usize) -> Vec<(f64, f64)> {
         .enumerate()
         .map(|(index, sample)| (index as f64, f64::from(*sample)))
         .collect()
+}
+
+/// Returns the selected start as a media timestamp.
+fn selection_start_time(editor: &VideoEditor) -> Duration {
+    frame_time(editor.selection.start_frame(), editor.summary.fps)
+}
+
+/// Returns the exclusive selected end as a media timestamp.
+fn selection_end_time(editor: &VideoEditor) -> Duration {
+    frame_time(editor.selection.end_frame(), editor.summary.fps)
+}
+
+/// Returns the current decoded frame number inside the source MP4.
+fn editor_frame(editor: &VideoEditor) -> u64 {
+    (editor.position.as_secs_f64() * f64::from(editor.summary.fps)).round() as u64
+}
+
+/// Returns the current picture position across the full source recording.
+fn editor_position_ratio(editor: &VideoEditor) -> f64 {
+    let duration = editor.summary.duration();
+    if duration.is_zero() {
+        0.0
+    } else {
+        (editor.position.as_secs_f64() / duration.as_secs_f64()).clamp(0.0, 1.0)
+    }
+}
+
+/// Returns the constant-rate timestamp for one video frame.
+fn frame_time(frame: u64, fps: u32) -> Duration {
+    if fps == 0 {
+        Duration::ZERO
+    } else {
+        Duration::from_secs_f64(frame as f64 / f64::from(fps))
+    }
 }
 
 /// Formats a duration as an hours, minutes, and seconds clock.
@@ -1960,6 +2604,44 @@ mod tests {
         app.drain_video_events(&receiver);
     }
 
+    fn attach_video_editor(app: &mut VideoApp) -> Receiver<PreviewCommand> {
+        let (commands, command_receiver) = bounded(8);
+        let (_event_sender, events) = bounded(8);
+        let summary = VideoSummary {
+            output: PathBuf::from("recording-20260821-005218.mp4"),
+            width: 2_560,
+            height: 1_440,
+            fps: 60,
+            frames: 5_400,
+            sample_rate: 48_000,
+            video_bitrate: 20_000_000,
+            audio_bitrate: 192_000,
+            recording_ready_ms: Some(148.0),
+            finalize_ms: 80.0,
+        };
+        app.completed_summary = Some(summary.clone());
+        app.editor = Some(VideoEditor {
+            selection: ClipSelection::new(0, summary.frames, summary.fps).unwrap(),
+            summary,
+            commands,
+            events,
+            decoder: None,
+            format: Some(PreviewFormat {
+                width: 2_560,
+                height: 1_440,
+                fps: 60.0,
+                duration: Duration::from_secs(90),
+            }),
+            position: Duration::ZERO,
+            playing: false,
+            awaiting_picture: false,
+            pending_seek: None,
+            error: None,
+            trim_job: None,
+        });
+        command_receiver
+    }
+
     #[test]
     fn video_started_event_activates_recording_state() {
         let mut app = video_app();
@@ -2078,6 +2760,45 @@ mod tests {
             .collect::<String>();
         assert!(content.contains("STARTING"));
         assert!(content.contains("preparing encoder"));
+    }
+
+    #[test]
+    fn video_editor_reuses_clip_handles_and_frame_nudging() {
+        let mut app = video_app();
+        let commands = attach_video_editor(&mut app);
+        press_video(&mut app, KeyCode::Right, KeyModifiers::CONTROL);
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.selection.start_frame(), 1);
+        assert_eq!(
+            commands.try_recv().unwrap(),
+            PreviewCommand::Seek(frame_time(1, 60))
+        );
+
+        press_video(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        press_video(&mut app, KeyCode::Left, KeyModifiers::SHIFT);
+        let editor = app.editor.as_ref().unwrap();
+        assert_eq!(editor.selection.active_handle(), SelectionHandle::End);
+        assert_eq!(editor.selection.end_frame(), 5_340);
+    }
+
+    #[test]
+    fn video_editor_renders_frame_preview_and_clip_range() {
+        let mut app = video_app();
+        let _commands = attach_video_editor(&mut app);
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let content = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(content.contains("VIDEO CLIP"));
+        assert!(content.contains("FRAME PREVIEW"));
+        assert!(content.contains("CLIP RANGE"));
+        assert!(content.contains("save clip"));
     }
 
     #[test]

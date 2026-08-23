@@ -67,8 +67,11 @@ use crate::audio::windows::{
     ComGuard, Converter, MediaFoundationGuard, SourceFormat, default_audio_client,
 };
 
-/// MP4 frame decoding and half-block preview rendering for review screens.
+/// Native MP4 frame decoding for the integrated video editor.
 pub mod preview;
+
+/// Frame-accurate MP4 replacement for the integrated video editor.
+pub mod clip;
 
 /// Maximum device-position gap that becomes inserted silence.
 const MAX_GAP_SECONDS: u64 = 5;
@@ -81,6 +84,12 @@ pub const DEFAULT_VIDEO_BITRATE: u32 = 20_000_000;
 
 /// The default encoded audio bit rate in bits per second.
 pub const DEFAULT_AUDIO_BITRATE: u32 = 192_000;
+
+/// Longest pixel edge retained for the terminal's live raster preview.
+const LIVE_PREVIEW_MAX_EDGE: u32 = 640;
+
+/// Maximum live-preview refresh rate, independent of the encoded frame rate.
+const LIVE_PREVIEW_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Selects the monitor that the recorder captures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -396,12 +405,23 @@ pub fn check_video_support() -> Result<()> {
 }
 
 /// Captures the screen and system audio until a stop condition.
-pub fn record_video(config: VideoConfig, events: &Sender<VideoEvent>) -> Result<VideoSummary> {
-    record_video_inner(&config, events)
+///
+/// When `previews` is present, the capture thread offers rate-limited,
+/// downsampled desktop frames without ever waiting for terminal rendering.
+pub fn record_video(
+    config: VideoConfig,
+    events: &Sender<VideoEvent>,
+    previews: Option<&Sender<preview::PreviewFrame>>,
+) -> Result<VideoSummary> {
+    record_video_inner(&config, events, previews)
 }
 
 /// Owns COM, Media Foundation, D3D11, WASAPI, and both capture loops.
-fn record_video_inner(config: &VideoConfig, events: &Sender<VideoEvent>) -> Result<VideoSummary> {
+fn record_video_inner(
+    config: &VideoConfig,
+    events: &Sender<VideoEvent>,
+    previews: Option<&Sender<preview::PreviewFrame>>,
+) -> Result<VideoSummary> {
     let _com = ComGuard::new()?;
     let _mf = MediaFoundationGuard::new()?;
 
@@ -480,6 +500,7 @@ fn record_video_inner(config: &VideoConfig, events: &Sender<VideoEvent>) -> Resu
     let mut expected_position = None;
     let mut recording_ready_ms: Option<f64> = None;
     let mut next_frame_time = Instant::now();
+    let mut next_preview_time = Instant::now();
     let mut last_frame: Option<Nv12Frame> = None;
     let mut recorded_time = RecordedTime::new();
     let mut was_paused = false;
@@ -511,7 +532,8 @@ fn record_video_inner(config: &VideoConfig, events: &Sender<VideoEvent>) -> Resu
         if !paused_now {
             match duplication.capture_next_frame() {
                 Ok(Some(texture)) => {
-                    let nv12 = unsafe {
+                    let preview_due = previews.is_some() && now >= next_preview_time;
+                    let (nv12, preview) = unsafe {
                         convert_to_nv12(
                             &device,
                             &texture,
@@ -519,9 +541,16 @@ fn record_video_inner(config: &VideoConfig, events: &Sender<VideoEvent>) -> Resu
                             crop.top,
                             crop.width,
                             crop.height,
+                            preview_due.then_some(recorded_time.value()),
                         )?
                     };
                     unsafe { writer.write_video_frame(&nv12, recorded_time.value())? };
+                    if preview_due {
+                        next_preview_time = now + LIVE_PREVIEW_INTERVAL;
+                    }
+                    if let (Some(sender), Some(preview)) = (previews, preview) {
+                        let _ = sender.try_send(preview);
+                    }
                     if recording_ready_ms.is_none() {
                         recording_ready_ms = Some(started.elapsed().as_secs_f64() * 1_000.0);
                     }
@@ -785,7 +814,8 @@ unsafe fn convert_to_nv12(
     crop_top: u32,
     width: u32,
     height: u32,
-) -> Result<Nv12Frame> {
+    preview_time: Option<Duration>,
+) -> Result<(Nv12Frame, Option<preview::PreviewFrame>)> {
     let context: ID3D11DeviceContext = unsafe { device.GetImmediateContext() }?;
     let staging_desc = D3D11_TEXTURE2D_DESC {
         Width: width,
@@ -850,8 +880,64 @@ unsafe fn convert_to_nv12(
             }
         }
     }
+    let preview = preview_time.map(|time| unsafe {
+        live_preview_from_bgra(
+            source_bytes,
+            source_stride,
+            crop_left,
+            crop_top,
+            width,
+            height,
+            time,
+        )
+    });
     unsafe { context.Unmap(&staging, 0) };
-    Ok(Nv12Frame { data: nv12 })
+    Ok((Nv12Frame { data: nv12 }, preview))
+}
+
+/// Samples a mapped top-down BGRA desktop into a small terminal raster frame.
+///
+/// # Safety
+///
+/// `source` must point to mapped BGRA rows covering the requested crop and
+/// remain valid for the duration of this call.
+unsafe fn live_preview_from_bgra(
+    source: *const u8,
+    source_stride: usize,
+    crop_left: u32,
+    crop_top: u32,
+    width: u32,
+    height: u32,
+    time: Duration,
+) -> preview::PreviewFrame {
+    let longest = width.max(height).max(1);
+    let scale = (f64::from(LIVE_PREVIEW_MAX_EDGE) / f64::from(longest)).min(1.0);
+    let preview_width = ((f64::from(width) * scale).round() as u32).max(1);
+    let preview_height = ((f64::from(height) * scale).round() as u32).max(1);
+    let mut bgra = vec![0_u8; preview_width as usize * preview_height as usize * 4];
+
+    for target_y in 0..preview_height as usize {
+        let source_y = target_y * height as usize / preview_height as usize;
+        for target_x in 0..preview_width as usize {
+            let source_x = target_x * width as usize / preview_width as usize;
+            let source_offset = (source_y + crop_top as usize) * source_stride
+                + (source_x + crop_left as usize) * 4;
+            let target_offset = (target_y * preview_width as usize + target_x) * 4;
+            unsafe {
+                bgra[target_offset] = *source.add(source_offset);
+                bgra[target_offset + 1] = *source.add(source_offset + 1);
+                bgra[target_offset + 2] = *source.add(source_offset + 2);
+            }
+            bgra[target_offset + 3] = 255;
+        }
+    }
+
+    preview::PreviewFrame {
+        bgra,
+        width: preview_width,
+        height: preview_height,
+        time,
+    }
 }
 
 /// Contains one converted NV12 frame in system memory.

@@ -156,7 +156,9 @@ record doctor
 
 ## Screen recording
 
-`record video` captures the primary monitor and system audio into one MP4 with H.264 video and AAC audio. Capture starts immediately without a source picker. Press `Ctrl+C` to stop and save a playable file.
+`record video` captures the primary monitor and system audio into one MP4 with H.264 video and AAC audio. Capture starts immediately and shows the desktop as a real raster video surface in Windows Terminal 1.22 or newer.
+
+Press `Ctrl+C` or `S` to stop capture and finalize the MP4. The same window then opens the video clip editor. `Tab` switches the start/end handle, the arrow keys move it, `Space` plays the selected frames, `Enter` saves the selection, and `Esc` keeps the original file. `Ctrl+Left` and `Ctrl+Right` move exactly one frame. `--no-tui` skips both the live preview and editor for scripts.
 
 ```text
 record video [OPTIONS]
