@@ -4,6 +4,20 @@ This file gives the important project changes. The project uses [Semantic Versio
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-22
+
+### Fixed
+
+- Sixel video frames now use synchronized terminal updates, preventing the
+  clear-before-draw flash that caused live and editor previews to flicker.
+- Video capture now retains the DXGI surface until its GPU copy finishes and
+  reuses one staging texture and NV12 buffer instead of allocating 4K resources
+  for every frame. A 2560x1440 60 fps stress capture dropped from roughly 910
+  MiB to 190 MiB of private memory and stayed flat beyond the reported crash.
+- The H.264 sink now requests hardware and low-latency transforms. NVIDIA NVENC
+  was verified active locally; the same Media Foundation path selects AMD or
+  Intel hardware encoders when their drivers expose them.
+
 ## [0.3.1] - 2026-08-22
 
 ### Added

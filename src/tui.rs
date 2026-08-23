@@ -23,7 +23,11 @@ use std::{
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, TrySendError};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::{
+    ExecutableCommand,
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
+};
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Alignment, Constraint, Flex, Layout, Rect},
@@ -1322,7 +1326,9 @@ impl VideoApp {
             if worker.is_finished() && self.completed_summary.is_none() {
                 break;
             }
-            terminal.draw(|frame| self.render_with_raster(frame, Some(&mut raster)))?;
+            draw_synchronized(terminal, |frame| {
+                self.render_with_raster(frame, Some(&mut raster));
+            })?;
             if event::poll(Duration::from_millis(33))? {
                 self.handle_event(event::read()?);
             }
@@ -2113,6 +2119,21 @@ impl VideoApp {
         );
         frame.render_widget(Clear, area);
         frame.render_widget(help, area);
+    }
+}
+
+/// Presents a complete terminal frame atomically when the emulator supports
+/// DEC synchronized output. Sixel replaces an image by clearing its cell area
+/// before transmitting the next picture; without synchronization that brief
+/// empty state is visible as playback flicker.
+fn draw_synchronized(terminal: &mut DefaultTerminal, draw: impl FnOnce(&mut Frame)) -> Result<()> {
+    terminal.backend_mut().execute(BeginSynchronizedUpdate)?;
+    let draw_result = terminal.draw(draw).map(|_| ());
+    let end_result = terminal.backend_mut().execute(EndSynchronizedUpdate);
+
+    match (draw_result, end_result) {
+        (Ok(_), Ok(_)) => Ok(()),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error.into()),
     }
 }
 
