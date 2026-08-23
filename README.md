@@ -156,7 +156,7 @@ record doctor
 
 ## Screen recording
 
-`record video` captures the primary monitor and system audio into one MP4 with H.264 video and AAC audio. Capture starts immediately and shows the desktop as a real raster video surface in Windows Terminal 1.22 or newer. Windows Terminal 1.23 or newer presents each Sixel frame as one synchronized update so playback does not flash between pictures.
+`record video` captures the primary monitor and system audio into one MP4 with H.264 video and AAC audio. DXGI supplies the desktop from the GPU framebuffer, and Media Foundation selects the installed NVIDIA, AMD, or Intel hardware H.264 transform when available. Capture starts immediately and shows the desktop as a real raster video surface in Windows Terminal 1.22 or newer. Windows Terminal 1.23 or newer presents each Sixel frame as one synchronized update so playback does not flash between pictures.
 
 Press `Ctrl+C` or `S` to stop capture and finalize the MP4. The same window then opens the video clip editor. `Tab` switches the start/end handle, the arrow keys move it, `Space` plays the selected frames, `Enter` saves the selection, and `Esc` keeps the original file. `Ctrl+Left` and `Ctrl+Right` move exactly one frame. `--no-tui` skips both the live preview and editor for scripts.
 

@@ -44,14 +44,16 @@ use windows::{
             },
             MediaFoundation::{
                 IMFAttributes, IMFByteStream, IMFMediaType, IMFSinkWriter, MF_ACCESSMODE_WRITE,
-                MF_FILEFLAGS_NONE, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
-                MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS,
+                MF_FILEFLAGS_NONE, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT,
+                MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE,
+                MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS,
                 MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES,
                 MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-                MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE, MF_OPENMODE_DELETE_IF_EXIST, MFAudioFormat_AAC,
-                MFAudioFormat_PCM, MFCreateFile, MFCreateMediaType, MFCreateMemoryBuffer,
+                MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE, MF_OPENMODE_DELETE_IF_EXIST,
+                MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MFAudioFormat_AAC, MFAudioFormat_PCM,
+                MFCreateAttributes, MFCreateFile, MFCreateMediaType, MFCreateMemoryBuffer,
                 MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video,
-                MFSampleExtension_CleanPoint, MFSampleExtension_Discontinuity, MFT_ENUM_FLAG_ALL,
+                MFSampleExtension_Discontinuity, MFT_ENUM_FLAG_ALL,
                 MFTranscodeGetAudioOutputAvailableTypes, MFVideoFormat_H264, MFVideoFormat_NV12,
             },
         },
@@ -464,6 +466,17 @@ fn record_video_inner(
             0.0,
         )
     }?;
+    let mut frame_converter = unsafe {
+        DesktopFrameConverter::new(
+            &device,
+            width,
+            height,
+            crop.left,
+            crop.top,
+            crop.width,
+            crop.height,
+        )?
+    };
 
     let audio_event = unsafe { CreateEventW(None, false, false, None)? };
     unsafe {
@@ -501,7 +514,6 @@ fn record_video_inner(
     let mut recording_ready_ms: Option<f64> = None;
     let mut next_frame_time = Instant::now();
     let mut next_preview_time = Instant::now();
-    let mut last_frame: Option<Nv12Frame> = None;
     let mut recorded_time = RecordedTime::new();
     let mut was_paused = false;
 
@@ -531,20 +543,17 @@ fn record_video_inner(
         let mut wrote_frame = false;
         if !paused_now {
             match duplication.capture_next_frame() {
-                Ok(Some(texture)) => {
+                Ok(Some(captured)) => {
                     let preview_due = previews.is_some() && now >= next_preview_time;
-                    let (nv12, preview) = unsafe {
-                        convert_to_nv12(
-                            &device,
-                            &texture,
-                            crop.left,
-                            crop.top,
-                            crop.width,
-                            crop.height,
+                    let preview = unsafe {
+                        frame_converter.convert(
+                            captured.texture(),
                             preview_due.then_some(recorded_time.value()),
                         )?
                     };
-                    unsafe { writer.write_video_frame(&nv12, recorded_time.value())? };
+                    unsafe {
+                        writer.write_video_frame(frame_converter.frame(), recorded_time.value())?
+                    };
                     if preview_due {
                         next_preview_time = now + LIVE_PREVIEW_INTERVAL;
                     }
@@ -554,7 +563,6 @@ fn record_video_inner(
                     if recording_ready_ms.is_none() {
                         recording_ready_ms = Some(started.elapsed().as_secs_f64() * 1_000.0);
                     }
-                    last_frame = Some(nv12);
                     wrote_frame = true;
                 }
                 Ok(None) => {
@@ -563,9 +571,9 @@ fn record_video_inner(
                     // Before any update arrives, emit one black frame so that
                     // idle screens still start the timeline and honor
                     // the configured duration.
-                    let frame =
-                        last_frame.get_or_insert_with(|| Nv12Frame::black(crop.width, crop.height));
-                    unsafe { writer.write_video_frame(frame, recorded_time.value())? };
+                    unsafe {
+                        writer.write_video_frame(frame_converter.frame(), recorded_time.value())?
+                    };
                     wrote_frame = true;
                 }
                 Err(error) => {
@@ -575,7 +583,7 @@ fn record_video_inner(
                         let _ = events.try_send(VideoEvent::Notice(error.to_string()));
                         break;
                     }
-                    last_frame = None;
+                    frame_converter.clear();
                 }
             }
             if wrote_frame {
@@ -775,7 +783,7 @@ impl MonitorDuplication {
     }
 
     /// Acquires one desktop texture or reports no update.
-    fn capture_next_frame(&mut self) -> Result<Option<ID3D11Texture2D>> {
+    fn capture_next_frame(&mut self) -> Result<Option<AcquiredDesktopFrame>> {
         let mut frame_info = Default::default();
         let mut resource = None;
         let result = unsafe {
@@ -794,105 +802,176 @@ impl MonitorDuplication {
             .ok_or_else(|| anyhow!("desktop duplication returned no frame resource"))?
             .cast()
             .context("the duplicated frame is not a texture")?;
-        let _ = unsafe { self.duplication.ReleaseFrame() };
-        Ok(Some(texture))
+        Ok(Some(AcquiredDesktopFrame {
+            duplication: self.duplication.clone(),
+            texture,
+        }))
     }
 }
 
-/// Converts one BGRA desktop texture to NV12 through a staging readback.
+/// Keeps a duplicated desktop surface valid until all GPU work using it ends.
+struct AcquiredDesktopFrame {
+    duplication: IDXGIOutputDuplication,
+    texture: ID3D11Texture2D,
+}
+
+impl AcquiredDesktopFrame {
+    const fn texture(&self) -> &ID3D11Texture2D {
+        &self.texture
+    }
+}
+
+impl Drop for AcquiredDesktopFrame {
+    fn drop(&mut self) {
+        let _ = unsafe { self.duplication.ReleaseFrame() };
+    }
+}
+
+/// Reuses one GPU readback texture and one system-memory NV12 frame.
 ///
-/// This keeps the first version correct and simple. A later phase replaces
-/// the readback with a compute shader so the CPU never touches full frames.
-///
-/// # Safety
-///
-/// `texture` must be a valid BGRA texture of the requested size.
-unsafe fn convert_to_nv12(
-    device: &ID3D11Device,
-    texture: &ID3D11Texture2D,
+/// D3D allocations are deliberately stable across capture frames. Creating a
+/// full-resolution staging resource for every frame makes the graphics driver
+/// retain a large allocation pool and can exhaust memory during live preview.
+struct DesktopFrameConverter {
+    context: ID3D11DeviceContext,
+    staging: ID3D11Texture2D,
     crop_left: u32,
     crop_top: u32,
     width: u32,
     height: u32,
-    preview_time: Option<Duration>,
-) -> Result<(Nv12Frame, Option<preview::PreviewFrame>)> {
-    let context: ID3D11DeviceContext = unsafe { device.GetImmediateContext() }?;
-    let staging_desc = D3D11_TEXTURE2D_DESC {
-        Width: width,
-        Height: height,
-        MipLevels: 1,
-        ArraySize: 1,
-        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        Usage: D3D11_USAGE_STAGING,
-        BindFlags: 0,
-        CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-        MiscFlags: 0,
-    };
-    let mut staging_out = None;
-    unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging_out))? };
-    let staging =
-        staging_out.ok_or_else(|| anyhow!("CreateTexture2D returned no staging texture"))?;
-    unsafe { context.CopyResource(&staging, texture) };
-    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-    unsafe { context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))? };
+    frame: Nv12Frame,
+}
 
-    let luma_stride = width as usize;
-    let chroma_stride = width as usize;
-    let luma_size = luma_stride * height as usize;
-    let chroma_size = chroma_stride * (height as usize / 2);
-    let mut nv12 = vec![0_u8; luma_size + chroma_size];
-    let source_bytes = mapped.pData.cast::<u8>();
-    let source_stride = mapped.RowPitch as usize;
-
-    for row in 0..height as usize {
-        unsafe {
-            let source_row = source_bytes
-                .add((row + crop_top as usize) * source_stride + crop_left as usize * 4);
-            let luma_row = nv12.as_mut_ptr().add(row * luma_stride);
-            for column in 0..width as usize {
-                let pixel = source_row.add(column * 4);
-                let blue = f32::from(*pixel);
-                let green = f32::from(*pixel.add(1));
-                let red = f32::from(*pixel.add(2));
-                let luma = (0.2126 * red + 0.7152 * green + 0.0722 * blue).round();
-                *luma_row.add(column) = luma.clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-    for row in 0..(height as usize / 2) {
-        unsafe {
-            let source_row = source_bytes
-                .add((row * 2 + crop_top as usize) * source_stride + crop_left as usize * 4);
-            let chroma_row = nv12.as_mut_ptr().add(luma_size + row * chroma_stride);
-            for column in 0..(width as usize / 2) {
-                let pixel = source_row.add(column * 8);
-                let blue = f32::from(*pixel);
-                let green = f32::from(*pixel.add(1));
-                let red = f32::from(*pixel.add(2));
-                let cb = (-0.1146 * red - 0.3854 * green + 0.5 * blue + 128.0).round();
-                let cr = (0.5 * red - 0.4542 * green - 0.0458 * blue + 128.0).round();
-                *chroma_row.add(column * 2) = cb.clamp(0.0, 255.0) as u8;
-                *chroma_row.add(column * 2 + 1) = cr.clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-    let preview = preview_time.map(|time| unsafe {
-        live_preview_from_bgra(
-            source_bytes,
-            source_stride,
+impl DesktopFrameConverter {
+    /// Allocates the fixed resources used by every captured desktop frame.
+    ///
+    /// # Safety
+    ///
+    /// `device` must be the device that owns the duplicated desktop textures.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn new(
+        device: &ID3D11Device,
+        source_width: u32,
+        source_height: u32,
+        crop_left: u32,
+        crop_top: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
+        let context = unsafe { device.GetImmediateContext()? };
+        let staging_desc = D3D11_TEXTURE2D_DESC {
+            Width: source_width,
+            Height: source_height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+        let mut staging = None;
+        unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging))? };
+        Ok(Self {
+            context,
+            staging: staging.context("CreateTexture2D returned no staging texture")?,
             crop_left,
             crop_top,
             width,
             height,
-            time,
-        )
-    });
-    unsafe { context.Unmap(&staging, 0) };
-    Ok((Nv12Frame { data: nv12 }, preview))
+            frame: Nv12Frame::black(width, height),
+        })
+    }
+
+    /// Copies and converts the current desktop surface without reallocating.
+    ///
+    /// # Safety
+    ///
+    /// `texture` must belong to the converter's D3D device and remain acquired
+    /// until this method returns.
+    unsafe fn convert(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        preview_time: Option<Duration>,
+    ) -> Result<Option<preview::PreviewFrame>> {
+        unsafe { self.context.CopyResource(&self.staging, texture) };
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe {
+            self.context
+                .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?
+        };
+
+        let luma_stride = self.width as usize;
+        let chroma_stride = self.width as usize;
+        let luma_size = luma_stride * self.height as usize;
+        let source_bytes = mapped.pData.cast::<u8>();
+        let source_stride = mapped.RowPitch as usize;
+
+        for row in 0..self.height as usize {
+            unsafe {
+                let source_row = source_bytes.add(
+                    (row + self.crop_top as usize) * source_stride + self.crop_left as usize * 4,
+                );
+                let luma_row = self.frame.data.as_mut_ptr().add(row * luma_stride);
+                for column in 0..self.width as usize {
+                    let pixel = source_row.add(column * 4);
+                    let blue = f32::from(*pixel);
+                    let green = f32::from(*pixel.add(1));
+                    let red = f32::from(*pixel.add(2));
+                    let luma = (0.2126 * red + 0.7152 * green + 0.0722 * blue).round();
+                    *luma_row.add(column) = luma.clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        for row in 0..(self.height as usize / 2) {
+            unsafe {
+                let source_row = source_bytes.add(
+                    (row * 2 + self.crop_top as usize) * source_stride
+                        + self.crop_left as usize * 4,
+                );
+                let chroma_row = self
+                    .frame
+                    .data
+                    .as_mut_ptr()
+                    .add(luma_size + row * chroma_stride);
+                for column in 0..(self.width as usize / 2) {
+                    let pixel = source_row.add(column * 8);
+                    let blue = f32::from(*pixel);
+                    let green = f32::from(*pixel.add(1));
+                    let red = f32::from(*pixel.add(2));
+                    let cb = (-0.1146 * red - 0.3854 * green + 0.5 * blue + 128.0).round();
+                    let cr = (0.5 * red - 0.4542 * green - 0.0458 * blue + 128.0).round();
+                    *chroma_row.add(column * 2) = cb.clamp(0.0, 255.0) as u8;
+                    *chroma_row.add(column * 2 + 1) = cr.clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        let preview = preview_time.map(|time| unsafe {
+            live_preview_from_bgra(
+                source_bytes,
+                source_stride,
+                self.crop_left,
+                self.crop_top,
+                self.width,
+                self.height,
+                time,
+            )
+        });
+        unsafe { self.context.Unmap(&self.staging, 0) };
+        Ok(preview)
+    }
+
+    const fn frame(&self) -> &Nv12Frame {
+        &self.frame
+    }
+
+    fn clear(&mut self) {
+        self.frame.clear();
+    }
 }
 
 /// Samples a mapped top-down BGRA desktop into a small terminal raster frame.
@@ -958,6 +1037,13 @@ impl Nv12Frame {
             *byte = 128;
         }
         Self { data }
+    }
+
+    /// Restores black in place so a display reset does not replace the buffer.
+    fn clear(&mut self) {
+        let luma_size = self.data.len() * 2 / 3;
+        self.data[..luma_size].fill(0);
+        self.data[luma_size..].fill(128);
     }
 }
 
@@ -1031,12 +1117,15 @@ impl Mp4Writer {
         let audio_input = unsafe { audio_input_type(sample_rate)? };
 
         let setup = (|| -> Result<(IMFSinkWriter, u32, u32)> {
+            let mut attributes = None;
+            unsafe { MFCreateAttributes(&mut attributes, 2)? };
+            let attributes = attributes.context("could not create sink writer attributes")?;
+            unsafe {
+                attributes.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
+                attributes.SetUINT32(&MF_LOW_LATENCY, 1)?;
+            }
             let writer = unsafe {
-                MFCreateSinkWriterFromURL(
-                    PCWSTR(wide_path.as_ptr()),
-                    &byte_stream,
-                    None::<&IMFAttributes>,
-                )
+                MFCreateSinkWriterFromURL(PCWSTR(wide_path.as_ptr()), &byte_stream, &attributes)
             }?;
             let video_stream = unsafe { writer.AddStream(&video_output)? };
             unsafe {
@@ -1098,7 +1187,6 @@ impl Mp4Writer {
             sample.AddBuffer(&buffer)?;
             sample.SetSampleTime((timestamp.as_nanos() / 100) as i64)?;
             sample.SetSampleDuration(frame_duration_100ns(self.fps))?;
-            sample.SetUINT32(&MFSampleExtension_CleanPoint, 1)?;
             self.writer
                 .as_ref()
                 .ok_or_else(|| anyhow!("the MP4 writer was already closed"))?
@@ -1219,7 +1307,6 @@ unsafe fn video_output_type(
         )?;
         media_type.SetUINT64(&MF_MT_FRAME_RATE, (u64::from(fps.max(1))) << 32 | 1)?;
         media_type.SetUINT32(&MF_MT_INTERLACE_MODE, 2)?;
-        media_type.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1)?;
     }
     Ok(media_type)
 }
@@ -1911,5 +1998,17 @@ mod tests {
 
         let small = Nv12Frame::black(2, 2);
         assert_eq!(small.data, vec![0, 0, 0, 0, 128, 128]);
+    }
+
+    #[test]
+    fn clearing_an_nv12_frame_reuses_its_allocation() {
+        let mut frame = Nv12Frame::black(64, 48);
+        let allocation = frame.data.as_ptr();
+        frame.data.fill(255);
+        frame.clear();
+        let luma_size = 64 * 48;
+        assert_eq!(frame.data.as_ptr(), allocation);
+        assert!(frame.data[..luma_size].iter().all(|byte| *byte == 0));
+        assert!(frame.data[luma_size..].iter().all(|byte| *byte == 128));
     }
 }
