@@ -4,6 +4,13 @@ This file gives the important project changes. The project uses [Semantic Versio
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-22
+
+### Fixed
+
+- Sixel video frames now use synchronized terminal updates, preventing the
+  clear-before-draw flash that caused live and editor previews to flicker.
+
 ## [0.3.1] - 2026-08-22
 
 ### Added
