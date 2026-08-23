@@ -4,6 +4,13 @@ This file gives the important project changes. The project uses [Semantic Versio
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-08-22
+
+### Fixed
+
+- The `record video` completion summary now prints the saved MP4 path as a
+  clickable terminal hyperlink.
+
 ## [0.3.2] - 2026-08-22
 
 ### Fixed

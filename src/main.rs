@@ -353,6 +353,7 @@ fn run_video(cli: Cli, _launched_at: Instant) -> Result<()> {
         }
     })??;
     let summary = edited_summary.unwrap_or(recorded_summary);
+    println!("✓ Saved {}", output_link(&summary.output));
     println!(
         "  {:.1}s · {}x{} @ {} fps · H.264 {} Mbps + AAC {} kbps",
         summary.duration().as_secs_f64(),
