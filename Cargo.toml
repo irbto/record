@@ -1,6 +1,6 @@
 [package]
 name = "record-tui"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 rust-version = "1.90"
 description = "One-command Windows system-audio MP3 recording and DXGI screen capture to H.264/AAC MP4"
