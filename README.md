@@ -158,7 +158,9 @@ record doctor
 
 `record video` captures the primary monitor and system audio into one MP4 with H.264 video and AAC audio. DXGI supplies the desktop from the GPU framebuffer, and Media Foundation selects the installed NVIDIA, AMD, or Intel hardware H.264 transform when available. Capture starts immediately and shows the desktop as a real raster video surface in Windows Terminal 1.22 or newer. Windows Terminal 1.23 or newer presents each Sixel frame as one synchronized update so playback does not flash between pictures.
 
-Press `Ctrl+C` or `S` to stop capture and finalize the MP4. The same window then opens the video clip editor. `Tab` switches the start/end handle, the arrow keys move it, `Space` plays the selected frames, `Enter` saves the selection, and `Esc` keeps the original file. `Ctrl+Left` and `Ctrl+Right` move exactly one frame. `--no-tui` skips both the live preview and editor for scripts.
+Press `Ctrl+C` or `S` to stop capture and finalize the MP4. The same window then opens the video clip editor with a full-width audio waveform aligned to the clip range and playhead. `T` selects the range handles, `V` selects video fade-in/out, `A` selects audio fade-in/out, and `C` selects the four crop edges; press a shortcut again to cycle that tool's handles. `Tab` and `Shift+Tab` move through every handle, and the arrow keys adjust the selected value. Fade adjustments use 0.1 second normally, one second with `Shift`, or one frame with `Ctrl`. Crop edges use two-pixel steps normally or 20 pixels with `Shift`, and the preview dims the area that will be removed.
+
+`Space` starts or pauses playback and resumes from the current frame, `Backspace` returns to the range's start marker, `R` resets every edit, `Enter` applies the selected range, fades, and crop, and `Esc` keeps the original file. Cropping reduces the encoded output dimensions shown in the edit-tool strip. `--no-tui` skips both the live preview and editor for scripts.
 
 ```text
 record video [OPTIONS]

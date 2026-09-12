@@ -4,35 +4,49 @@
 //! then the recorder's existing sink writer rebuilds the MP4. The replacement
 //! is written beside the source and swapped in only after finalization succeeds.
 
+mod reader;
+
 use std::{
     fs,
+    ops::Range,
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
-    ptr,
     time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use windows::{
-    Win32::{
-        Media::MediaFoundation::{
-            IMFSourceReader, MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE,
-            MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
-            MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
-            MF_MT_SUBTYPE, MF_SOURCE_READER_ALL_STREAMS,
-            MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
-            MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM, MFAudioFormat_PCM,
-            MFCreateAttributes, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Audio,
-            MFMediaType_Video, MFVideoFormat_NV12,
-        },
-        Storage::FileSystem::{REPLACEFILE_WRITE_THROUGH, ReplaceFileW},
-        System::{Com::StructuredStorage::PROPVARIANT, Variant::VT_I8},
-    },
-    core::{GUID, PCWSTR},
+    Win32::Storage::FileSystem::{REPLACEFILE_WRITE_THROUGH, ReplaceFileW},
+    core::PCWSTR,
 };
 
-use super::{Mp4Writer, Nv12Frame, VideoSummary};
+use super::{
+    Mp4Writer, Nv12Frame, VideoSummary,
+    edit::{
+        FadeEnvelope, ValidatedVideoEditSettings, VideoEditSettings, crop_nv12, fade_nv12,
+        fade_pcm16,
+    },
+};
 use crate::audio::windows::{ComGuard, MediaFoundationGuard};
+use reader::ClipReader;
+
+/// Describes the current stage of rebuilding and replacing a trimmed video.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TrimProgress {
+    /// The source reader, destination writer, and temporary output are being prepared.
+    Preparing,
+    /// Decoded video frames are being written to the trimmed output.
+    Processing {
+        /// Number of selected video frames written so far.
+        completed_frames: u64,
+        /// Total number of selected video frames to write.
+        total_frames: u64,
+    },
+    /// The new MP4 is being finalized into a complete playable file.
+    Finishing,
+    /// The finalized temporary MP4 is replacing the original recording.
+    Saving,
+}
 
 /// Re-encodes `start_frame..end_frame` and safely replaces the source MP4.
 pub fn trim_video(
@@ -41,19 +55,71 @@ pub fn trim_video(
     start_frame: u64,
     end_frame: u64,
 ) -> Result<VideoSummary> {
+    trim_video_with_progress(path, summary, start_frame, end_frame, |_| {})
+}
+
+/// Re-encodes one frame range with optional crop and independent audio/video fades.
+pub fn trim_video_with_settings(
+    path: &Path,
+    summary: &VideoSummary,
+    start_frame: u64,
+    end_frame: u64,
+    settings: &VideoEditSettings,
+) -> Result<VideoSummary> {
+    trim_video_with_settings_and_progress(path, summary, start_frame, end_frame, settings, |_| {})
+}
+
+/// Re-encodes one frame range while reporting each stage of the replacement.
+pub(crate) fn trim_video_with_progress(
+    path: &Path,
+    summary: &VideoSummary,
+    start_frame: u64,
+    end_frame: u64,
+    progress: impl FnMut(TrimProgress),
+) -> Result<VideoSummary> {
+    trim_video_with_settings_and_progress(
+        path,
+        summary,
+        start_frame,
+        end_frame,
+        &VideoEditSettings::default(),
+        progress,
+    )
+}
+
+/// Re-encodes one edited frame range while reporting each replacement stage.
+pub(crate) fn trim_video_with_settings_and_progress(
+    path: &Path,
+    summary: &VideoSummary,
+    start_frame: u64,
+    end_frame: u64,
+    settings: &VideoEditSettings,
+    mut progress: impl FnMut(TrimProgress),
+) -> Result<VideoSummary> {
     if start_frame >= end_frame || end_frame > summary.frames {
         bail!("the video selection is outside the recorded frame range");
     }
-    if start_frame == 0 && end_frame == summary.frames {
+    if start_frame == 0 && end_frame == summary.frames && settings.is_identity() {
         return Ok(summary.clone());
     }
+    let validated = settings.validate(summary.width, summary.height)?;
 
+    progress(TrimProgress::Preparing);
     let temporary = temporary_output(path)?;
-    let result = trim_video_inner(&temporary, path, summary, start_frame, end_frame);
+    let result = trim_video_inner(
+        &temporary,
+        path,
+        summary,
+        start_frame..end_frame,
+        settings,
+        validated,
+        &mut progress,
+    );
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     let mut trimmed = result?;
+    progress(TrimProgress::Saving);
     if let Err(error) = replace_source(path, &temporary) {
         let _ = fs::remove_file(&temporary);
         return Err(error);
@@ -67,17 +133,21 @@ fn trim_video_inner(
     temporary: &Path,
     source: &Path,
     summary: &VideoSummary,
-    start_frame: u64,
-    end_frame: u64,
+    frame_range: Range<u64>,
+    settings: &VideoEditSettings,
+    validated: ValidatedVideoEditSettings,
+    progress: &mut impl FnMut(TrimProgress),
 ) -> Result<VideoSummary> {
+    let start_frame = frame_range.start;
+    let end_frame = frame_range.end;
     let _com = ComGuard::new()?;
     let _media_foundation = MediaFoundationGuard::new()?;
     let mut reader = unsafe { ClipReader::open(source, summary)? };
     let mut writer = unsafe {
         Mp4Writer::open(
             temporary,
-            summary.width,
-            summary.height,
+            validated.output_width,
+            validated.output_height,
             summary.fps,
             summary.video_bitrate,
             summary.sample_rate,
@@ -93,10 +163,26 @@ fn trim_video_inner(
     let target_video_frames = end_frame - start_frame;
     let source_audio_start = scale_frames(start_frame, summary.sample_rate, summary.fps);
     let target_audio_frames = scale_frames(target_video_frames, summary.sample_rate, summary.fps);
+    let video_fade = FadeEnvelope::new(
+        target_video_frames,
+        summary.fps,
+        settings.video_fade_in,
+        settings.video_fade_out,
+    );
+    let audio_fade = FadeEnvelope::new(
+        target_audio_frames,
+        summary.sample_rate,
+        settings.audio_fade_in,
+        settings.audio_fade_out,
+    );
     let mut written_video = 0_u64;
     let mut written_audio = 0_u64;
     let mut video_ended = false;
     let mut audio_ended = false;
+    progress(TrimProgress::Processing {
+        completed_frames: 0,
+        total_frames: target_video_frames,
+    });
 
     while (!video_ended && written_video < target_video_frames)
         || (!audio_ended && written_audio < target_audio_frames)
@@ -105,17 +191,38 @@ fn trim_video_inner(
             match unsafe { reader.read_video()? } {
                 Some(sample) => {
                     if sample.timestamp >= hundred_nanos(start) {
-                        let frame = Nv12Frame {
-                            data: pack_nv12(
-                                &sample.bytes,
+                        let mut data = pack_nv12(
+                            &sample.bytes,
+                            summary.width,
+                            summary.height,
+                            reader.video_stride,
+                        )?;
+                        if validated.output_width != summary.width
+                            || validated.output_height != summary.height
+                        {
+                            data = crop_nv12(
+                                data,
                                 summary.width,
                                 summary.height,
-                                reader.video_stride,
-                            )?,
-                        };
+                                settings,
+                                validated,
+                            )?;
+                        }
+                        fade_nv12(
+                            &mut data,
+                            validated.output_width,
+                            validated.output_height,
+                            written_video,
+                            &video_fade,
+                        )?;
+                        let frame = Nv12Frame { data };
                         let timestamp = frame_time(written_video, summary.fps);
                         unsafe { writer.write_video_frame(&frame, timestamp)? };
                         written_video += 1;
+                        progress(TrimProgress::Processing {
+                            completed_frames: written_video,
+                            total_frames: target_video_frames,
+                        });
                     }
                 }
                 None => video_ended = true,
@@ -142,7 +249,8 @@ fn trim_video_inner(
                             let offset = wanted_source_frame.saturating_sub(sample_start);
                             let available = sample_frames.saturating_sub(offset);
                             let frames = available.min(target_audio_frames - written_audio);
-                            let pcm = pcm_slice(&sample.bytes, offset, frames)?;
+                            let mut pcm = pcm_slice(&sample.bytes, offset, frames)?;
+                            fade_pcm16(&mut pcm, written_audio, &audio_fade);
                             unsafe { writer.write_audio(&pcm)? };
                             written_audio += frames;
                         }
@@ -159,137 +267,8 @@ fn trim_video_inner(
     if written_audio < target_audio_frames {
         write_silence(&mut writer, target_audio_frames - written_audio)?;
     }
+    progress(TrimProgress::Finishing);
     unsafe { writer.close() }
-}
-
-/// One decoded Media Foundation sample and its original presentation time.
-struct DecodedSample {
-    timestamp: i64,
-    bytes: Vec<u8>,
-}
-
-/// Owns the two decoded streams selected from a finished recording.
-struct ClipReader {
-    reader: IMFSourceReader,
-    video_stride: usize,
-}
-
-impl ClipReader {
-    /// Opens H.264 as NV12 and AAC as stereo PCM16.
-    ///
-    /// # Safety
-    ///
-    /// COM and Media Foundation must be initialized on the current thread.
-    unsafe fn open(path: &Path, summary: &VideoSummary) -> Result<Self> {
-        let absolute = std::path::absolute(path)
-            .with_context(|| format!("could not resolve {}", path.display()))?;
-        let wide = wide_path(&absolute);
-        let mut attributes_slot = None;
-        unsafe { MFCreateAttributes(&mut attributes_slot, 4)? };
-        let attributes = attributes_slot.context("could not create Media Foundation attributes")?;
-        unsafe {
-            attributes.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)?;
-        }
-        let reader = unsafe { MFCreateSourceReaderFromURL(PCWSTR(wide.as_ptr()), &attributes) }
-            .with_context(|| format!("could not open {} for trimming", path.display()))?;
-        unsafe {
-            reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
-            reader.SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, true)?;
-            reader.SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32, true)?;
-        }
-
-        let video = unsafe { MFCreateMediaType()? };
-        unsafe {
-            video.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            video.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
-            video.SetUINT64(
-                &MF_MT_FRAME_SIZE,
-                (u64::from(summary.width) << 32) | u64::from(summary.height),
-            )?;
-            video.SetUINT64(&MF_MT_FRAME_RATE, u64::from(summary.fps.max(1)) << 32 | 1)?;
-            reader.SetCurrentMediaType(
-                MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
-                None,
-                &video,
-            )?;
-        }
-        let current_video =
-            unsafe { reader.GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32)? };
-        let video_stride = unsafe { current_video.GetUINT32(&MF_MT_DEFAULT_STRIDE) }
-            .map_or(summary.width as usize, |stride| stride as usize);
-
-        let audio = unsafe { MFCreateMediaType()? };
-        unsafe {
-            audio.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
-            audio.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)?;
-            audio.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, 2)?;
-            audio.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, summary.sample_rate)?;
-            audio.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
-            audio.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, 4)?;
-            audio.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, summary.sample_rate * 4)?;
-            reader.SetCurrentMediaType(
-                MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32,
-                None,
-                &audio,
-            )?;
-        }
-        Ok(Self {
-            reader,
-            video_stride,
-        })
-    }
-
-    /// Seeks both selected streams to the requested media time.
-    unsafe fn seek(&mut self, time: Duration) -> Result<()> {
-        let mut position = PROPVARIANT::default();
-        unsafe {
-            (*position.Anonymous.Anonymous).vt = VT_I8;
-            (*position.Anonymous.Anonymous).Anonymous.hVal = hundred_nanos(time);
-            self.reader.SetCurrentPosition(&GUID::zeroed(), &position)?;
-        }
-        Ok(())
-    }
-
-    /// Reads the next decoded NV12 sample.
-    unsafe fn read_video(&mut self) -> Result<Option<DecodedSample>> {
-        unsafe { self.read(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32) }
-    }
-
-    /// Reads the next decoded PCM sample.
-    unsafe fn read_audio(&mut self) -> Result<Option<DecodedSample>> {
-        unsafe { self.read(MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32) }
-    }
-
-    /// Reads through stream ticks until a sample or end-of-stream flag arrives.
-    unsafe fn read(&mut self, stream: u32) -> Result<Option<DecodedSample>> {
-        loop {
-            let mut flags = 0_u32;
-            let mut timestamp = 0_i64;
-            let mut sample = None;
-            unsafe {
-                self.reader.ReadSample(
-                    stream,
-                    0,
-                    None,
-                    Some(&mut flags),
-                    Some(&mut timestamp),
-                    Some(&mut sample),
-                )?;
-            }
-            if let Some(sample) = sample {
-                let buffer = unsafe { sample.ConvertToContiguousBuffer()? };
-                let mut data = ptr::null_mut();
-                let mut length = 0_u32;
-                unsafe { buffer.Lock(&mut data, None, Some(&mut length))? };
-                let bytes = unsafe { std::slice::from_raw_parts(data, length as usize) }.to_vec();
-                unsafe { buffer.Unlock()? };
-                return Ok(Some(DecodedSample { timestamp, bytes }));
-            }
-            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                return Ok(None);
-            }
-        }
-    }
 }
 
 /// Packs potentially padded NV12 rows for the recorder's sink writer.
@@ -451,6 +430,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn full_range_identity_settings_skip_the_rebuild() {
+        let summary = VideoSummary {
+            output: PathBuf::from("does-not-need-to-exist.mp4"),
+            width: 64,
+            height: 48,
+            fps: 10,
+            frames: 10,
+            sample_rate: 48_000,
+            video_bitrate: 2_000_000,
+            audio_bitrate: 192_000,
+            recording_ready_ms: None,
+            finalize_ms: 0.0,
+        };
+        let mut progress = Vec::new();
+        let unchanged = trim_video_with_settings_and_progress(
+            &summary.output,
+            &summary,
+            0,
+            summary.frames,
+            &VideoEditSettings::default(),
+            |update| progress.push(update),
+        )
+        .unwrap();
+
+        assert_eq!(unchanged.output, summary.output);
+        assert_eq!(unchanged.frames, summary.frames);
+        assert!(progress.is_empty());
+    }
+
     #[cfg(windows)]
     #[test]
     fn trims_a_native_mp4_and_replaces_it() {
@@ -508,9 +517,36 @@ mod tests {
             .send(super::super::preview::PreviewCommand::Close)
             .unwrap();
         decoder.join().unwrap();
-        let trimmed = trim_video(&path, &original, 2, 7).unwrap();
+        let mut progress = Vec::new();
+        let trimmed = trim_video_with_progress(&path, &original, 2, 7, |update| {
+            progress.push(update);
+        })
+        .unwrap();
         assert_eq!(trimmed.frames, 5);
         assert_eq!(trimmed.duration(), Duration::from_millis(500));
+        assert_eq!(progress.first(), Some(&TrimProgress::Preparing));
+        assert_eq!(
+            progress.get(1),
+            Some(&TrimProgress::Processing {
+                completed_frames: 0,
+                total_frames: 5,
+            })
+        );
+        assert_eq!(
+            progress
+                .iter()
+                .rev()
+                .find(|update| matches!(update, TrimProgress::Processing { .. })),
+            Some(&TrimProgress::Processing {
+                completed_frames: 5,
+                total_frames: 5,
+            })
+        );
+        assert_eq!(
+            progress.get(progress.len().saturating_sub(2)),
+            Some(&TrimProgress::Finishing)
+        );
+        assert_eq!(progress.last(), Some(&TrimProgress::Saving));
         assert!(path.exists());
         assert!(
             !directory
@@ -521,5 +557,69 @@ mod tests {
                 ))
                 .exists()
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn edits_a_full_native_mp4_when_settings_are_not_identity() {
+        if super::super::check_video_support().is_err() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("edit-source.mp4");
+        let original = {
+            let _com = ComGuard::new().unwrap();
+            let _media_foundation = MediaFoundationGuard::new().unwrap();
+            let mut writer = unsafe {
+                Mp4Writer::open(
+                    &path, 320, 240, 10, 2_000_000, 48_000, 192_000, true, None, 0.0,
+                )
+            }
+            .unwrap();
+            for frame in 0..10 {
+                unsafe {
+                    writer
+                        .write_video_frame(
+                            &Nv12Frame::black(320, 240),
+                            Duration::from_millis(frame * 100),
+                        )
+                        .unwrap();
+                }
+            }
+            unsafe { writer.write_audio(&vec![1_000_i16; 48_000 * 2]).unwrap() };
+            unsafe { writer.close().unwrap() }
+        };
+        let settings = VideoEditSettings {
+            audio_fade_in: Duration::from_millis(200),
+            audio_fade_out: Duration::from_millis(300),
+            video_fade_in: Duration::from_millis(100),
+            video_fade_out: Duration::from_millis(200),
+            crop_left: 2,
+            crop_right: 2,
+            crop_top: 2,
+            crop_bottom: 2,
+        };
+        let mut progress = Vec::new();
+        let edited = trim_video_with_settings_and_progress(
+            &path,
+            &original,
+            0,
+            original.frames,
+            &settings,
+            |update| progress.push(update),
+        )
+        .unwrap();
+
+        assert_eq!(edited.width, 316);
+        assert_eq!(edited.height, 236);
+        assert_eq!(edited.frames, 10);
+        assert_eq!(edited.duration(), Duration::from_secs(1));
+        assert_eq!(edited.output, path);
+        assert_eq!(progress.first(), Some(&TrimProgress::Preparing));
+        assert_eq!(progress.last(), Some(&TrimProgress::Saving));
+        assert!(progress.contains(&TrimProgress::Processing {
+            completed_frames: 10,
+            total_frames: 10,
+        }));
     }
 }

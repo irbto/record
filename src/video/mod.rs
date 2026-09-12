@@ -72,6 +72,15 @@ use crate::audio::windows::{
 /// Native MP4 frame decoding for the integrated video editor.
 pub mod preview;
 
+/// Nonblocking audio-only playback for finalized MP4 editor previews.
+pub mod audio_preview;
+
+/// Reusable crop and fade settings for MP4 export.
+pub mod edit;
+
+/// Bounded audio waveform summaries for the integrated video editor.
+pub(crate) mod waveform;
+
 /// Frame-accurate MP4 replacement for the integrated video editor.
 pub mod clip;
 
