@@ -2,7 +2,6 @@
 
 > Type `record` for MP3 system audio. Type `record video` for H.264/AAC MP4 screen capture.
 
-[![CI](https://github.com/irbto/record/actions/workflows/ci.yml/badge.svg)](https://github.com/irbto/record/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-7c3aed.svg)](LICENSE)
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-06b6d4.svg)](#platform-support)
 
