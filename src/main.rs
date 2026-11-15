@@ -28,7 +28,12 @@ use clap::Parser;
 use crossbeam_channel::{Receiver, bounded};
 use record_tui::{
     audio::{self, AudioEvent, RecordConfig, RecordingSummary, SavedFileKind},
-    cli::{Cli, Command},
+    cli::{Cli, Command, ScreenshotMode},
+    screenshot::{
+        CaptureMode, MonitorChoice, ScreenshotConfig, default_directory,
+        hub::{HubSettings, run_tray, tray_is_running},
+        take_screenshot, ui, unique_output_path,
+    },
     session::{OutputTarget, create_session_directory, mp3_output_path},
     tui,
     video::{
@@ -68,6 +73,10 @@ fn main() -> Result<()> {
 
     if matches!(cli.command, Some(Command::Video { .. })) {
         return run_video(cli, launched_at);
+    }
+
+    if matches!(cli.command, Some(Command::Screenshot { .. })) {
+        return run_screenshot(cli);
     }
 
     let target = output_target(
@@ -368,6 +377,183 @@ fn run_video(cli: Cli, _launched_at: Instant) -> Result<()> {
             "  capture ready {ready:.1} ms · finalized in {:.1} ms",
             summary.finalize_ms
         );
+    }
+    Ok(())
+}
+
+/// Runs `record screenshot`: the hub, the tray, or one direct capture.
+fn run_screenshot(cli: Cli) -> Result<()> {
+    /// Marks the detached child process that owns the tray icon.
+    const TRAY_CHILD: &str = "RECORD_INTERNAL_TRAY";
+    /// Process creation flag for a child without a console.
+    const DETACHED_PROCESS: u32 = 0x8;
+
+    let Some(Command::Screenshot {
+        mode,
+        output,
+        dir,
+        monitor,
+        region,
+        delay,
+        every,
+        count,
+        no_copy,
+        sdr_white,
+        force,
+        tray,
+    }) = cli.command
+    else {
+        unreachable!("run_screenshot is only called for the screenshot command");
+    };
+    let monitor = if monitor.eq_ignore_ascii_case("pointer") {
+        MonitorChoice::Pointer
+    } else if monitor.eq_ignore_ascii_case("primary") {
+        MonitorChoice::Primary
+    } else {
+        MonitorChoice::Index(monitor.parse::<u32>().context(format!(
+            "invalid monitor {monitor}; use pointer, primary, or a monitor index"
+        ))?)
+    };
+    let directory = match dir {
+        Some(directory) => directory,
+        None if output.is_none() => default_directory(),
+        None => PathBuf::from("."),
+    };
+    let mode = match (region, mode) {
+        (Some(region), _) => Some(CaptureMode::Custom(region)),
+        (None, Some(ScreenshotMode::Region)) => Some(CaptureMode::Region),
+        (None, Some(ScreenshotMode::Full)) => Some(CaptureMode::Fullscreen),
+        (None, Some(ScreenshotMode::Monitor)) => Some(CaptureMode::Monitor),
+        (None, Some(ScreenshotMode::Window)) => Some(CaptureMode::Window),
+        (None, Some(ScreenshotMode::Last)) => Some(CaptureMode::LastRegion),
+        (None, None) => None,
+    };
+
+    let Some(mode) = mode else {
+        if output.is_some() || count.is_some() {
+            bail!("--output and --count need a capture mode such as region or full");
+        }
+        let settings = Arc::new(HubSettings {
+            directory,
+            monitor,
+            sdr_white_nits: sdr_white,
+            copy: AtomicBool::new(!no_copy),
+            save: AtomicBool::new(true),
+            auto_interval: every.unwrap_or(Duration::from_secs(5)),
+        });
+        if env::var_os(TRAY_CHILD).is_some() {
+            if !tray_is_running() {
+                run_tray(&settings);
+            }
+            return Ok(());
+        }
+        if tray {
+            use std::os::windows::process::CommandExt;
+
+            // A second tray process exits by itself when one already runs.
+            let program = env::current_exe().context("could not find the record executable")?;
+            let mut child = std::process::Command::new(program);
+            child
+                .args(env::args_os().skip(1))
+                .env(TRAY_CHILD, "1")
+                .creation_flags(DETACHED_PROCESS);
+            child.spawn().context("could not start the tray process")?;
+            println!("record screenshot runs in the notification area.");
+            println!("  Ctrl+PrtSc region · PrtSc fullscreen · Alt+PrtSc active window");
+            println!("  Right-click the icon for the menu and Quit.");
+            return Ok(());
+        }
+        if !(io::stdout().is_terminal() && io::stdin().is_terminal()) {
+            bail!("the screenshot hub needs a terminal; pass a mode such as full or region");
+        }
+        return ui::run(settings);
+    };
+
+    if tray {
+        bail!("--tray does not take a capture mode");
+    }
+    let repeats = match (every, count) {
+        (None, None) => 1,
+        (None, Some(count)) => count.max(1),
+        (Some(_), count) => count.unwrap_or(u32::MAX),
+    };
+    if repeats > 1 && mode == CaptureMode::Region {
+        bail!("auto capture cannot repeat the interactive region mode; use last or --region");
+    }
+    if repeats > 1 && output.is_some() {
+        bail!("auto capture writes timestamped files; use --dir instead of --output");
+    }
+    let explicit = match output {
+        Some(mut path) => {
+            if path.extension().is_none() {
+                path.set_extension("png");
+            }
+            if path
+                .extension()
+                .is_some_and(|extension| !extension.eq_ignore_ascii_case("png"))
+            {
+                bail!("the screenshot output file must use the .png extension");
+            }
+            if path.exists() && !force {
+                bail!(
+                    "refusing to overwrite {}; choose another path or pass --force",
+                    path.display()
+                );
+            }
+            Some(path)
+        }
+        None => None,
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    if repeats > 1 {
+        let stop = Arc::clone(&stop);
+        ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed))
+            .context("could not install the Ctrl+C handler")?;
+        eprintln!("● Auto capture. Press Ctrl+C to stop.");
+    }
+    for index in 0..repeats {
+        let config = ScreenshotConfig {
+            mode,
+            output: explicit
+                .clone()
+                .unwrap_or_else(|| unique_output_path(&directory, &video_timestamp())),
+            monitor,
+            save: true,
+            copy: !no_copy,
+            delay: if index == 0 { delay } else { None },
+            sdr_white_nits: sdr_white,
+        };
+        let Some(summary) = take_screenshot(&config)? else {
+            println!("Screenshot cancelled. No file was written.");
+            return Ok(());
+        };
+        match &summary.output {
+            Some(path) => println!("✓ Saved {}", output_link(path)),
+            None => println!("✓ Copied the screenshot to the clipboard"),
+        }
+        let mut detail = format!("  {}x{} · PNG", summary.width, summary.height);
+        if summary.copied && summary.output.is_some() {
+            detail.push_str(" · copied to the clipboard");
+        }
+        if summary.hdr {
+            detail.push_str(&format!(
+                " · HDR mapped to SDR at {:.0} nits SDR white",
+                summary.sdr_white_nits
+            ));
+        }
+        println!("{detail}");
+        if let Some(error) = &summary.clipboard_error {
+            eprintln!("  clipboard copy failed: {error}");
+        }
+        if index + 1 < repeats {
+            let wait_until = Instant::now() + every.unwrap_or(Duration::from_secs(1));
+            while Instant::now() < wait_until && !stop.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
     }
     Ok(())
 }

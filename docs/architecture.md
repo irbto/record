@@ -121,3 +121,21 @@ The sink writer finalizes each MP3 before it sends a save event. An incomplete w
 WASAPI requires one `ReleaseBuffer` call after each successful `GetBuffer` call. The packet loop saves processing errors until the release is complete.
 
 RAII guards stop the audio client and leave MMCSS. Other guards stop Media Foundation, uninitialize COM, close handles, and restore the terminal.
+
+## Screenshots
+
+`record screenshot` has three front ends: the terminal hub, the tray process, and direct capture. All three call the same capture function.
+
+A capture duplicates one DXGI output, copies a single frame to a staging texture, and stops duplication. Fullscreen, window, and fixed-region captures read every output and join the images into one virtual desktop before they crop.
+
+An HDR output gives a half-float scRGB surface through `IDXGIOutput5::DuplicateOutput1`. The `color` module divides each pixel by the SDR white level from `DisplayConfigGetDeviceInfo` and encodes sRGB. An SDR output gives 8-bit BGRA, which needs no conversion.
+
+The `editor` module owns the frozen image, the annotations, the selection, and the toolbar. It has no Windows dependency. It receives pointer and key values and draws complete frames into a pixel buffer.
+
+The `overlay` module owns a borderless topmost window on the captured monitor. It translates window messages to editor calls and copies each frame to the screen in `WM_PAINT`. GDI renders toolbar labels and typed text to coverage masks.
+
+The `hub` module owns one thread with a Windows message queue. Hotkeys, tray menu commands, timer ticks, and requests from the terminal hub arrive in that queue. The thread runs one capture at a time and drops the input that arrives during a capture.
+
+The `ui` module draws the terminal hub with Ratatui. It sends requests to the hub thread and shows the reports that come back. The tray process runs the same message loop on its main thread and has no terminal.
+
+The saved PNG and the clipboard bitmap come from the annotated image, cropped to the selection. They never contain the toolbar or the selection dimming.

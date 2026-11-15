@@ -4,6 +4,22 @@ This file gives the important project changes. The project uses [Semantic Versio
 
 ## [Unreleased]
 
+### Added
+
+- `record screenshot` opens a terminal hub with a capture menu, a preview,
+  and a history of saved screenshots. It captures a region, every monitor,
+  the active monitor, the active window, the last region, or a fixed
+  rectangle, and it can repeat a capture at an interval.
+- Global hotkeys work while the hub or the tray process runs: `Ctrl+PrtSc`
+  for a region, `PrtSc` for fullscreen, and `Alt+PrtSc` for the active window.
+- `record screenshot --tray` runs in the notification area without a terminal.
+- Region capture freezes one monitor in an overlay with a toolbar. It draws
+  rectangles, ellipses, lines, arrows, freehand strokes, text, step numbers,
+  marker highlights, spotlight, pixelation, blur, and an eraser.
+- Screenshots of HDR monitors read the scRGB desktop surface and map it to
+  sRGB with the SDR white level of the monitor, so the picture is not bright
+  and washed out.
+
 ## [0.3.3] - 2026-08-22
 
 ### Fixed

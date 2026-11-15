@@ -16,6 +16,8 @@ pub mod cli;
 /// Named clip selection, preview, and trimming.
 pub mod clip;
 pub(crate) mod raster;
+/// HDR-aware screen capture with an on-screen annotation overlay.
+pub mod screenshot;
 /// Session directory, part, and clip naming rules.
 pub mod session;
 /// Bounded FFT data for the spectrum display.

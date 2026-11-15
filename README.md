@@ -1,6 +1,6 @@
 # record
 
-> Type `record` for MP3 system audio. Type `record video` for H.264/AAC MP4 screen capture.
+> Type `record` for MP3 system audio. Type `record video` for H.264/AAC MP4 screen capture. Type `record screenshot` for annotated, HDR-correct PNG screenshots.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-7c3aed.svg)](LICENSE)
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-06b6d4.svg)](#platform-support)
@@ -198,6 +198,96 @@ The recorder supports MP3 and MP4 only. No other container or codec is supported
 Windows blocks desktop duplication for protected content such as Netflix or Blu-ray players. Those windows appear black in the recording. The recorder also stops when Windows switches to the secure desktop (UAC prompt or lock screen) and recovers when you return to the normal desktop.
 
 HDR displays are captured and encoded as SDR. The DXGI desktop duplication API returns SDR-mapped frames on HDR displays, so no tone mapping is needed. Colors may look slightly different from the HDR display.
+## Screenshots
+
+`record screenshot` opens the screenshot hub in the terminal. The hub has a capture menu, a preview of the selected screenshot, and a history of the screenshots folder. Global hotkeys work while the hub is open.
+
+| Capture | Hotkey | Hub key |
+|---|---|---|
+| Region with annotation overlay | `Ctrl+PrtSc` | `R` |
+| Fullscreen, all monitors | `PrtSc` | `F` |
+| Active window | `Alt+PrtSc` | `W`, after 3 seconds |
+| Active monitor | | `M` |
+| Last region | | `L` |
+| Region in 3 seconds | | `D` |
+| Auto capture on or off | | `A` |
+| Screen recording in a new window | | `V` |
+
+`Tab` moves between the menu and the history. `Enter` runs the selected entry or opens the selected image. `C` copies the selected image, `O` opens the screenshots folder, and `Q` quits. The hub shows `in use` beside a hotkey that another program holds.
+
+Each capture writes a PNG to `Pictures\Screenshots` and places the image on the clipboard. The two after-capture entries in the menu turn each task on or off.
+
+### Region overlay
+
+A region capture copies the monitor under the mouse pointer from the GPU and freezes it in a borderless window on that monitor. A toolbar floats on the frozen picture. Drag to select the region to keep, draw on the picture, and press `Enter`. The overlay is a native window, because a terminal cannot draw over the desktop. The toolbar and the dimmed area outside the selection are never part of the image.
+
+| Key | Tool or action |
+|---|---|
+| `S` | Select the region to keep. Drag inside the region to move it |
+| `R`, `E`, `L`, `A`, `P` | Rectangle, ellipse, line, arrow, freehand pen |
+| `T` | Text. Click, type, and press `Enter` |
+| `H` | Marker highlight |
+| `X`, `B` | Pixelate or blur a rectangle |
+| `N` | Step number. Each click places the next number |
+| `O` | Spotlight. Darkens everything outside a rectangle |
+| `D` | Eraser. Covers a rectangle with the color under the start of the drag |
+| `1` to `6` | Select a color |
+| `[`, `]`, mouse wheel | Change the stroke, text, block, or blur size |
+| Arrow keys | Move the selection by one pixel. `Shift` changes its size |
+| `Ctrl+Z`, `Ctrl+Y` | Undo or redo |
+| `Tab` | Move the toolbar to the other screen edge |
+| `Enter`, `Ctrl+S` | Finish and run the after-capture tasks |
+| `Ctrl+C` | Copy the image and do not write a file |
+| `Esc` | Cancel the text or drag in progress. Otherwise close and discard |
+
+Without a selection, the image contains the complete monitor.
+
+### Notification area
+
+`record screenshot --tray` starts a background process with an icon in the notification area and returns to the prompt at once. The same three hotkeys work. A left click on the icon starts a region capture. A right click opens the capture menu, which also contains Quit.
+
+### Direct capture
+
+A mode after the command captures at once and exits. This form does not open the hub.
+
+```text
+record screenshot [MODE] [OPTIONS]
+
+Modes:
+  region   Select and annotate a region on a frozen monitor
+  full     Every monitor as one image
+  monitor  The monitor under the mouse pointer
+  window   The active window
+  last     The last region again
+
+Options:
+  -o, --output <FILE>      PNG destination. Omit for a timestamped file
+      --dir <FOLDER>       Folder for timestamped files
+      --monitor <MONITOR>  pointer, primary, or an index number [default: pointer]
+      --region <REGION>    Capture LEFT,TOP,WIDTH,HEIGHT in desktop pixels
+  -d, --delay <SECONDS>    Wait before the capture
+      --every <SECONDS>    Auto capture: repeat at this interval
+      --count <COUNT>      Auto capture: stop after this many captures
+      --no-copy            Do not place the image on the clipboard
+      --sdr-white <NITS>   Override the SDR white level of an HDR monitor
+  -f, --force              Replace an existing output file
+      --tray               Run in the notification area
+```
+
+```powershell
+# Capture the active window after two seconds.
+record screenshot window -d 2
+
+# Capture a fixed rectangle every 10 seconds until Ctrl+C.
+record screenshot --region 0,0,1280,720 --every 10
+```
+
+### HDR monitors
+
+Windows composes an HDR desktop in linear scRGB, where SDR content sits at the SDR white level of the monitor. Tools that read that surface as plain 8-bit color produce bright, washed-out pictures. `record screenshot` requests the half-float surface, divides it by the SDR white level that Windows reports for the monitor, and encodes the result as sRGB. SDR windows keep their original colors. HDR highlights above SDR white scale down to white without a hue change.
+
+The status line shows the SDR white level that the conversion used. Use `--sdr-white` if a picture is too bright or too dark.
+
 ## Startup design
 
 The no-argument path does not start the general CLI parser. It creates the session and starts the audio worker before it starts the TUI.

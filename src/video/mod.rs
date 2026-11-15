@@ -724,7 +724,7 @@ pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
     Ok(monitors)
 }
 /// Creates a hardware D3D11 device with BGRA support for desktop duplication.
-fn create_d3d_device() -> Result<ID3D11Device> {
+pub(crate) fn create_d3d_device() -> Result<ID3D11Device> {
     let mut device = None;
     unsafe {
         D3D11CreateDevice(
