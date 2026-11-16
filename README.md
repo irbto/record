@@ -339,32 +339,46 @@ Windows composes an HDR desktop in linear scRGB, where SDR content sits at the S
 
 The status line shows the SDR white level that the conversion used. Use `--sdr-white` if a picture is too bright or too dark.
 
-## Desktop dashboard
+## Desktop program
 
-`record-desktop` is one window for all three kinds of recording. It uses the same engines and the same stored settings as the terminal program.
+`record-desktop` is one window for all three kinds of recording. It uses the same engines and the same stored settings as the terminal program. The window is a [Tauri](https://tauri.app) program: the engines stay in Rust, and the interface is a small web page that Windows draws with its own WebView2.
 
-A switcher at the top selects the mode. The window opens on the mode that was last used.
+The window opens on **Home**. Home has one large button for each mode, the most recent files, and the state of the global hotkeys. Tabs at the top switch between Home, System audio, Screen capture, and Screenshot.
+
+- **System audio** shows the time, two six-second scopes, the spectrum, and the left and right levels. It writes MP3 files to `Music\record`.
+- **Screen capture** selects the monitor and the frame rate and shows a live picture. It writes MP4 files to `Videos\record`.
+- **Screenshot** has the capture list, the after-capture switches, the upload destination, and the history with a preview. The window minimizes during a capture, so it is never in its own picture.
+
+The menu bar holds every command. **File** starts, pauses, and saves a recording and opens Settings. **View** switches screens. **Capture** has every screenshot mode and the upload destination. **Help** lists the keys.
 
 | Key | Action |
 |---|---|
-| `1`, `2`, `3` | Sound, Video, Screenshot |
-| `Space` | Start or stop the recording of the current mode |
-| `P` | Pause or continue |
-| `R`, `F`, `W`, `M`, `L` | Screenshot mode: region, fullscreen, active window, monitor, last region |
+| `Ctrl+0` to `Ctrl+3` | Home, System audio, Screen capture, Screenshot |
+| `Ctrl+R` | Start recording |
+| `Space` | Start, pause, or resume |
+| `Ctrl+P` | Pause or resume |
+| `Ctrl+S` | Save and stop |
+| `Ctrl+O` | Open the output folder |
+| `Ctrl+D` | Upload destination |
+| `Ctrl+,` | Settings |
+| `Alt+F`, `Alt+V`, `Alt+C`, `Alt+H` | Open a menu |
 
-- **Sound** shows the time, the left and right levels, and a scrolling waveform. It writes MP3 files to `Music\record`.
-- **Video** selects the screen and the frame rate and shows a live picture. It writes MP4 files to `Videos\record`.
-- **Screenshot** has the capture buttons, the after-capture switches, the upload destination, and the history with a preview. The global hotkeys work while the window is open.
+The screenshot hotkeys `Ctrl+PrtSc`, `PrtSc`, and `Alt+PrtSc` work in every program while the window is open.
 
-One sound or video recording runs at a time. The switcher marks the mode that is recording, and the other modes stay reachable.
+One audio or video recording runs at a time. The tab of the mode that records shows a red dot, and the other screens stay reachable. If you close the window during a recording, the program saves the file first.
+
+To add a ShareX custom uploader, drop its `.sxcu` file on the window.
 
 ```powershell
 cargo build --release -p record-desktop
 target\release\record-desktop.exe
-target\release\record-desktop.exe video
 ```
 
-The dashboard is new. The terminal program has more options for each mode, such as session folders, clips, crop, and the settings menu.
+The build needs only Rust. The interface is in `crates/record-desktop/ui`, and its built form in `ui/dist` is part of the repository. To change the interface, edit `ui/src` and run `npm install` and `npm run build` in `crates/record-desktop/ui`. Open `ui/dist/index.html` in a browser to see the interface with a simulated signal.
+
+Windows 11 includes WebView2. Windows 10 gets it with Microsoft Edge.
+
+The terminal program has more options for each mode, such as session folders, clips, and crop.
 
 ## Startup design
 

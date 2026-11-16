@@ -1,44 +1,75 @@
-//! The engines of `record-core` behind the dashboard boundary.
+//! The engines of `record-core` behind plain updates.
 //!
 //! Each recording runs on its own thread. A second thread translates engine
-//! events into the plain updates that the dashboard reads, so capture never
-//! waits for drawing.
+//! events into the updates that the interface reads, so capture never waits
+//! for drawing.
 
 use std::{
+    collections::VecDeque,
     env, fs,
     path::{Path, PathBuf},
-    process::Command,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
 };
 
-use crossbeam_channel::{Sender, bounded, unbounded};
+use crossbeam_channel::{bounded, unbounded};
 use record_core::{
     audio::{self, AudioEvent, RecordConfig},
-    screenshot::copy_file_to_clipboard,
     session::OutputTarget,
-    video::{
-        self, CropRect, FitMode, VideoConfig, VideoEvent, VideoSource, enumerate_monitors,
-        preview::PreviewFrame, video_timestamp,
-    },
+    spectrum::Spectrum,
+    video::{self, CropRect, FitMode, VideoConfig, VideoEvent, VideoSource, preview::PreviewFrame},
 };
 
-use crate::backend::{Engines, Mode, Monitor, Session, SoundUpdate, VideoUpdate};
+use crate::payload::{Mode, SoundUpdate, VideoUpdate, extent, file_name, spectrum_bands};
 
-/// H.264 bit rate of dashboard recordings in bits per second.
-const VIDEO_BITRATE: u32 = 20_000_000;
-/// AAC bit rate of dashboard recordings in bits per second.
-const AUDIO_BITRATE: u32 = 192_000;
+/// H.264 bit rate of recordings in bits per second.
+pub const VIDEO_BITRATE: u32 = 20_000_000;
+/// AAC bit rate of video recordings in bits per second.
+pub const VIDEO_AUDIO_BITRATE: u32 = 192_000;
+/// MP3 bit rate of audio recordings in bits per second.
+pub const SOUND_BITRATE: u32 = 320_000;
+/// Number of samples in one spectrum transform.
+const SPECTRUM_SIZE: usize = 2_048;
+/// Number of bands that the interface draws.
+const SPECTRUM_BANDS: usize = 24;
 
-/// Runs the real capture engines.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CoreEngines;
+/// The switches that stop and pause one recording.
+#[derive(Clone, Debug, Default)]
+pub struct Control {
+    /// Ends the recording and closes the file.
+    pub stop: Arc<AtomicBool>,
+    /// Holds the recording without closing the file.
+    pub paused: Arc<AtomicBool>,
+}
 
-/// Returns the largest absolute sample of a block.
-fn peak(samples: &[f32]) -> f32 {
-    samples
-        .iter()
-        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()))
+/// The newest live picture of a video recording.
+#[derive(Debug, Default)]
+pub struct Picture {
+    /// Counts pictures, so the interface can skip one it already has.
+    pub sequence: u32,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Packed RGBA bytes in top-down rows.
+    pub rgba: Vec<u8>,
+}
+
+/// Receives the updates of one recording.
+pub type Report<U> = Arc<dyn Fn(U) + Send + Sync>;
+
+/// Returns the folder that receives the recordings of one mode.
+#[must_use]
+pub fn default_folder(mode: Mode) -> PathBuf {
+    let home = env::var_os("USERPROFILE").map_or_else(|| PathBuf::from("."), PathBuf::from);
+    match mode {
+        Mode::Audio => home.join("Music").join("record"),
+        Mode::Video => home.join("Videos").join("record"),
+        Mode::Screenshot => record_core::screenshot::default_directory(),
+    }
 }
 
 /// Creates the folder of an output file and formats a failure.
@@ -50,221 +81,189 @@ fn prepare(output: &Path) -> Result<(), String> {
     }
 }
 
-/// Starts a named thread. A failure to start is reported as an update.
-fn spawn<U: Send + 'static>(
-    name: &str,
-    updates: &Sender<U>,
-    failed: fn(String) -> U,
-    work: impl FnOnce() + Send + 'static,
-) {
-    if let Err(error) = thread::Builder::new().name(name.to_owned()).spawn(work) {
-        let _ = updates.send(failed(format!(
-            "could not start the {name} thread: {error}"
-        )));
+/// Splits an engine result into the file name and the failure text.
+fn outcome(result: Result<PathBuf, String>) -> (Option<String>, Option<String>) {
+    match result {
+        Ok(path) => (Some(file_name(&path)), None),
+        Err(error) => (None, Some(error)),
     }
 }
 
-impl Engines for CoreEngines {
-    fn start_sound(&self, output: PathBuf, bitrate: u32) -> Session<SoundUpdate> {
-        let (updates, receiver) = unbounded();
-        let stop = Arc::new(AtomicBool::new(false));
-        let paused = Arc::new(AtomicBool::new(false));
-        let session = Session {
-            updates: receiver,
-            stop: Arc::clone(&stop),
-            paused: Arc::clone(&paused),
-        };
-        let worker_updates = updates.clone();
-        spawn(
-            "sound",
-            &updates,
-            |error| SoundUpdate::Stopped(Err(error)),
-            move || {
-                let updates = worker_updates;
-                let (events, event_receiver) = unbounded::<AudioEvent>();
-                // The engine reads clip commands from this channel. The
-                // dashboard sends none, and the sender must outlive the run.
-                let (_commands, command_receiver) = bounded(1);
-                let translated = updates.clone();
-                let translator = thread::spawn(move || {
-                    let mut rate = 48_000_u32;
-                    for event in event_receiver {
-                        let update = match event {
-                            AudioEvent::Started {
+/// Starts an audio recording on a new thread.
+///
+/// The last update is always `Stopped`.
+pub fn start_sound(output: PathBuf, control: &Control, report: Report<SoundUpdate>) {
+    let control = control.clone();
+    let worker = Arc::clone(&report);
+    let started = thread::Builder::new()
+        .name("sound".to_owned())
+        .spawn(move || {
+            let report = worker;
+            let (events, event_receiver) = unbounded::<AudioEvent>();
+            // The engine reads clip commands from this channel. This program
+            // sends none, and the sender must outlive the run.
+            let (_commands, command_receiver) = bounded(1);
+            let translated = Arc::clone(&report);
+            let translator = thread::spawn(move || {
+                let mut rate = 48_000_u32;
+                let mut spectrum = None;
+                let mut window = VecDeque::with_capacity(SPECTRUM_SIZE);
+                for event in event_receiver {
+                    let update = match event {
+                        AudioEvent::Started {
+                            sample_rate,
+                            bitrate,
+                            ..
+                        } => {
+                            rate = sample_rate.max(1);
+                            SoundUpdate::Started {
                                 sample_rate,
                                 bitrate,
-                                ..
-                            } => {
-                                rate = sample_rate.max(1);
-                                SoundUpdate::Started {
-                                    sample_rate,
-                                    bitrate,
-                                }
                             }
-                            AudioEvent::Samples {
-                                left,
-                                right,
-                                encoded_frames,
-                            } => SoundUpdate::Levels {
-                                left: peak(&left),
-                                right: peak(&right),
+                        }
+                        AudioEvent::Samples {
+                            left,
+                            right,
+                            encoded_frames,
+                        } => {
+                            for (left, right) in left.iter().zip(&right) {
+                                if window.len() == SPECTRUM_SIZE {
+                                    window.pop_front();
+                                }
+                                window.push_back((left + right) / 2.0);
+                            }
+                            let spectrum =
+                                spectrum.get_or_insert_with(|| Spectrum::new(SPECTRUM_SIZE));
+                            spectrum.update(window.iter().copied());
+                            SoundUpdate::Block {
+                                left: extent(&left),
+                                right: extent(&right),
                                 seconds: encoded_frames as f64 / f64::from(rate),
-                            },
-                            AudioEvent::Finalizing => SoundUpdate::Finalizing,
-                            AudioEvent::Notice(notice) => SoundUpdate::Notice(notice),
-                            AudioEvent::Saved(_) => continue,
-                        };
-                        if translated.send(update).is_err() {
-                            break;
+                                bands: spectrum_bands(spectrum.bins(), rate, SPECTRUM_BANDS),
+                            }
                         }
-                    }
-                });
-                let result = prepare(&output).and_then(|()| {
-                    let config = RecordConfig {
-                        target: OutputTarget::SingleFile {
-                            path: output,
-                            replace: false,
-                        },
-                        bitrate,
-                        duration: None,
-                        commands: command_receiver,
-                        stop,
-                        paused,
+                        AudioEvent::Finalizing => SoundUpdate::Finalizing,
+                        AudioEvent::Notice(text) => SoundUpdate::Notice { text },
+                        AudioEvent::Saved(_) => continue,
                     };
-                    audio::record(config, &events)
-                        .map(|summary| summary.output)
-                        .map_err(|error| format!("{error:#}"))
-                });
-                drop(events);
-                let _ = translator.join();
-                let _ = updates.send(SoundUpdate::Stopped(result));
-            },
-        );
-        session
-    }
-
-    fn start_video(&self, output: PathBuf, monitor: u32, fps: u32) -> Session<VideoUpdate> {
-        let (updates, receiver) = unbounded();
-        let stop = Arc::new(AtomicBool::new(false));
-        let paused = Arc::new(AtomicBool::new(false));
-        let session = Session {
-            updates: receiver,
-            stop: Arc::clone(&stop),
-            paused: Arc::clone(&paused),
-        };
-        let worker_updates = updates.clone();
-        spawn(
-            "video",
-            &updates,
-            |error| VideoUpdate::Stopped(Err(error)),
-            move || {
-                let updates = worker_updates;
-                let (events, event_receiver) = unbounded::<VideoEvent>();
-                // A full preview channel makes the engine skip a picture.
-                let (previews, preview_receiver) = bounded::<PreviewFrame>(2);
-                let translated = updates.clone();
-                let translator = thread::spawn(move || {
-                    for event in event_receiver {
-                        let update = match event {
-                            VideoEvent::Started {
-                                width, height, fps, ..
-                            } => VideoUpdate::Started { width, height, fps },
-                            VideoEvent::Finalizing => VideoUpdate::Finalizing,
-                            VideoEvent::Notice(notice) => VideoUpdate::Notice(notice),
-                            VideoEvent::Saved(_) => continue,
-                        };
-                        if translated.send(update).is_err() {
-                            break;
-                        }
-                    }
-                });
-                let pictures = updates.clone();
-                let painter = thread::spawn(move || {
-                    for frame in preview_receiver {
-                        let mut rgba = frame.bgra;
-                        for pixel in rgba.chunks_exact_mut(4) {
-                            pixel.swap(0, 2);
-                            pixel[3] = 255;
-                        }
-                        let update = VideoUpdate::Preview {
-                            width: frame.width,
-                            height: frame.height,
-                            rgba,
-                        };
-                        if pictures.send(update).is_err() {
-                            break;
-                        }
-                    }
-                });
-                let result = prepare(&output).and_then(|()| {
-                    let config = VideoConfig {
-                        source: VideoSource::Index(monitor),
-                        crop: CropRect::default(),
-                        fit: FitMode::default(),
-                        canvas_width: 0,
-                        canvas_height: 0,
-                        video_bitrate: VIDEO_BITRATE,
-                        audio_bitrate: AUDIO_BITRATE,
-                        fps,
-                        duration: None,
-                        output,
+                    translated(update);
+                }
+            });
+            let result = prepare(&output).and_then(|()| {
+                let config = RecordConfig {
+                    target: OutputTarget::SingleFile {
+                        path: output,
                         replace: false,
-                        stop,
-                        paused,
+                    },
+                    bitrate: SOUND_BITRATE,
+                    duration: None,
+                    commands: command_receiver,
+                    stop: control.stop,
+                    paused: control.paused,
+                };
+                audio::record(config, &events)
+                    .map(|summary| summary.output)
+                    .map_err(|error| format!("{error:#}"))
+            });
+            drop(events);
+            let _ = translator.join();
+            let (file, error) = outcome(result);
+            report(SoundUpdate::Stopped { file, error });
+        });
+    if let Err(error) = started {
+        report(SoundUpdate::Stopped {
+            file: None,
+            error: Some(format!("could not start the audio thread: {error}")),
+        });
+    }
+}
+
+/// Starts a video recording of one monitor on a new thread.
+///
+/// Live pictures go to `picture`. The last update is always `Stopped`.
+pub fn start_video(
+    output: PathBuf,
+    monitor: u32,
+    fps: u32,
+    control: &Control,
+    picture: Arc<Mutex<Picture>>,
+    report: Report<VideoUpdate>,
+) {
+    let control = control.clone();
+    let worker = Arc::clone(&report);
+    let started = thread::Builder::new()
+        .name("video".to_owned())
+        .spawn(move || {
+            let report = worker;
+            let (events, event_receiver) = unbounded::<VideoEvent>();
+            // A full preview channel makes the engine skip a picture.
+            let (previews, preview_receiver) = bounded::<PreviewFrame>(2);
+            let translated = Arc::clone(&report);
+            let translator = thread::spawn(move || {
+                for event in event_receiver {
+                    let update = match event {
+                        VideoEvent::Started {
+                            width, height, fps, ..
+                        } => VideoUpdate::Started { width, height, fps },
+                        VideoEvent::Finalizing => VideoUpdate::Finalizing,
+                        VideoEvent::Notice(text) => VideoUpdate::Notice { text },
+                        VideoEvent::Saved(_) => continue,
                     };
-                    video::record_video(config, &events, Some(&previews))
-                        .map(|summary| summary.output)
-                        .map_err(|error| format!("{error:#}"))
-                });
-                drop(events);
-                drop(previews);
-                let _ = translator.join();
-                let _ = painter.join();
-                let _ = updates.send(VideoUpdate::Stopped(result));
-            },
-        );
-        session
+                    translated(update);
+                }
+            });
+            let painter = thread::spawn(move || {
+                for frame in preview_receiver {
+                    let mut rgba = frame.bgra;
+                    for pixel in rgba.chunks_exact_mut(4) {
+                        pixel.swap(0, 2);
+                        pixel[3] = 255;
+                    }
+                    if let Ok(mut picture) = picture.lock() {
+                        picture.sequence = picture.sequence.wrapping_add(1).max(1);
+                        picture.width = frame.width;
+                        picture.height = frame.height;
+                        picture.rgba = rgba;
+                    }
+                }
+            });
+            let result = prepare(&output).and_then(|()| {
+                let config = VideoConfig {
+                    source: VideoSource::Index(monitor),
+                    crop: CropRect::default(),
+                    fit: FitMode::default(),
+                    canvas_width: 0,
+                    canvas_height: 0,
+                    video_bitrate: VIDEO_BITRATE,
+                    audio_bitrate: VIDEO_AUDIO_BITRATE,
+                    fps,
+                    duration: None,
+                    output,
+                    replace: false,
+                    stop: control.stop,
+                    paused: control.paused,
+                };
+                video::record_video(config, &events, Some(&previews))
+                    .map(|summary| summary.output)
+                    .map_err(|error| format!("{error:#}"))
+            });
+            drop(events);
+            drop(previews);
+            let _ = translator.join();
+            let _ = painter.join();
+            let (file, error) = outcome(result);
+            report(VideoUpdate::Stopped { file, error });
+        });
+    if let Err(error) = started {
+        report(VideoUpdate::Stopped {
+            file: None,
+            error: Some(format!("could not start the video thread: {error}")),
+        });
     }
+}
 
-    fn monitors(&self) -> Vec<Monitor> {
-        enumerate_monitors()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|monitor| Monitor {
-                index: monitor.index,
-                name: monitor.name,
-                width: monitor.width,
-                height: monitor.height,
-                primary: monitor.primary,
-            })
-            .collect()
-    }
-
-    fn timestamp(&self) -> String {
-        video_timestamp()
-    }
-
-    fn folder(&self, mode: Mode) -> PathBuf {
-        let home = env::var_os("USERPROFILE").map_or_else(|| PathBuf::from("."), PathBuf::from);
-        match mode {
-            Mode::Sound => home.join("Music").join("record"),
-            Mode::Video => home.join("Videos").join("record"),
-            Mode::Screenshot => record_core::screenshot::default_directory(),
-        }
-    }
-
-    fn reveal(&self, path: &Path) {
-        let mut command = Command::new("explorer");
-        if path.is_file() {
-            command.arg("/select,").arg(path);
-        } else {
-            let _ = fs::create_dir_all(path);
-            command.arg(path);
-        }
-        let _ = command.spawn();
-    }
-
-    fn copy_image(&self, path: &Path) -> Result<(), String> {
-        copy_file_to_clipboard(path).map_err(|error| format!("{error:#}"))
-    }
+/// Reports whether a control asks its recording to stop.
+#[must_use]
+pub fn stopping(control: &Control) -> bool {
+    control.stop.load(Ordering::Relaxed)
 }

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>record</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <nav class="menubar" id="menubar" role="menubar" aria-label="Program menu"></nav>
+
+  <header class="tabs">
+    <a class="brand" href="#/" aria-label="record, home">record</a>
+    <nav class="tablist" role="tablist" aria-label="Screens">
+      <a class="tab" role="tab" href="#/" data-route="home">Home</a>
+      <a class="tab" role="tab" href="#/audio" data-route="audio">System audio<span class="live" aria-hidden="true">●</span></a>
+      <a class="tab" role="tab" href="#/video" data-route="video">Screen capture<span class="live" aria-hidden="true">●</span></a>
+      <a class="tab" role="tab" href="#/screenshot" data-route="screenshot">Screenshot<span class="live" aria-hidden="true">●</span></a>
+    </nav>
+    <a class="now" id="now" href="#/audio" hidden></a>
+  </header>
+
+  <main>
+    <!-- Home: the three things the program does, and what it made last. -->
+    <section class="view" id="home" aria-label="Home">
+      <div class="choices">
+        <a class="panel choice cyan" href="#/audio">
+          <span class="title">System audio</span>
+          <canvas id="art-audio" aria-hidden="true"></canvas>
+          <strong>Record audio</strong>
+          <p>Everything the PC plays, saved as one MP3 file.</p>
+          <span class="meta"><span>MP3, 320 kbps</span><kbd>Ctrl+1</kbd></span>
+        </a>
+        <a class="panel choice green" href="#/video">
+          <span class="title">Screen capture</span>
+          <canvas id="art-video" aria-hidden="true"></canvas>
+          <strong>Record video</strong>
+          <p>One monitor with the system audio, saved as an MP4 file.</p>
+          <span class="meta"><span>H.264 and AAC</span><kbd>Ctrl+2</kbd></span>
+        </a>
+        <a class="panel choice purple" href="#/screenshot">
+          <span class="title">Screenshot</span>
+          <canvas id="art-shot" aria-hidden="true"></canvas>
+          <strong>Take a screenshot</strong>
+          <p>A region, a window, or a screen. Mark it up, copy it, upload it.</p>
+          <span class="meta"><span>PNG, correct in HDR</span><kbd>Ctrl+3</kbd></span>
+        </a>
+      </div>
+      <div class="panel recent"><span class="title">Recent files</span><div class="body rows scroll" id="recent"></div></div>
+      <div class="panel hotkeys"><span class="title">Global hotkeys</span><div class="body rows" id="hotkeys"></div></div>
+    </section>
+
+    <!-- System audio. -->
+    <section class="view" id="audio" aria-label="System audio">
+      <div class="transport" id="transport-audio"></div>
+      <div class="panel cyan scope-left"><span class="title">Left, last 6 seconds</span><div class="body"><canvas id="scope-left"></canvas></div></div>
+      <div class="panel green scope-right"><span class="title">Right, last 6 seconds</span><div class="body"><canvas id="scope-right"></canvas></div></div>
+      <div class="panel purple spectrum"><span class="title">Spectrum, 40 Hz to 20 kHz</span><div class="body"><canvas id="spectrum"></canvas></div></div>
+      <div class="panel files"><span class="title" id="audio-files-title">Recordings</span><div class="body rows scroll" id="audio-files"></div></div>
+      <div class="meters">
+        <div class="meter cyan"><span>L</span><span class="db" id="db-left"></span><div class="track"><i id="bar-left"></i></div></div>
+        <div class="meter green"><span>R</span><span class="db" id="db-right"></span><div class="track"><i id="bar-right"></i></div></div>
+      </div>
+    </section>
+
+    <!-- Screen capture. -->
+    <section class="view" id="video" aria-label="Screen capture">
+      <div class="transport" id="transport-video"></div>
+      <div class="panel green picture"><span class="title" id="picture-title">Preview</span><div class="body"><canvas id="desktop"></canvas><p class="empty" id="desktop-empty"></p></div></div>
+      <div class="panel"><span class="title">Source</span><div class="body rows" id="sources"></div></div>
+      <div class="panel"><span class="title">Output</span><div class="body rows" id="video-settings"></div></div>
+      <div class="panel files"><span class="title" id="video-files-title">Recordings</span><div class="body rows scroll" id="video-files"></div></div>
+    </section>
+
+    <!-- Screenshot. -->
+    <section class="view" id="screenshot" aria-label="Screenshot">
+      <div class="panel purple"><span class="title">Capture</span><div class="body rows" id="capture-menu"></div></div>
+      <div class="panel"><span class="title">After each capture</span><div class="body rows" id="after-menu"></div></div>
+      <div class="panel purple preview">
+        <span class="title" id="preview-title">Preview</span>
+        <div class="body"><canvas id="shot"></canvas><p class="empty" id="shot-empty"></p></div>
+        <div class="actions" id="shot-actions"></div>
+        <div class="history"><span class="title" id="history-title">History</span><div class="rows scroll" id="history"></div></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="status">
+    <span id="message" role="status"></span>
+    <button class="path" id="output" title="Open this folder"></button>
+  </footer>
+</div>
+
+<dialog id="dialog" aria-labelledby="dialog-title">
+  <form method="dialog" class="panel cyan sheet" id="sheet">
+    <span class="title" id="dialog-title"></span>
+    <div class="body" id="dialog-body"></div>
+  </form>
+</dialog>
+<script src="app.js"></script>
+</body>
+</html>

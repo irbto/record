@@ -3,7 +3,11 @@
 //! One small text file holds `name=value` lines. Unknown lines are ignored,
 //! so an older version can read a file that a newer version wrote.
 
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use super::upload::{settings_directory, write_setting};
 
@@ -148,10 +152,48 @@ impl SavedSettings {
 #[must_use]
 pub fn autostart_enabled() -> bool {
     cfg!(windows)
-        && Command::new("reg")
+        && registry_tool()
             .args(["query", AUTOSTART_KEY, "/v", AUTOSTART_NAME])
             .output()
             .is_ok_and(|output| output.status.success())
+}
+
+/// Builds a `reg` command that opens no console window.
+///
+/// The desktop program has no console, so a plain child process would flash
+/// one on the screen.
+fn registry_tool() -> Command {
+    let mut command = Command::new("reg");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        /// The `CREATE_NO_WINDOW` process creation flag.
+        const NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(NO_WINDOW);
+    }
+    command
+}
+
+/// Picks the program that the sign-in entry starts.
+///
+/// `record` names itself. Any other program, such as the desktop program,
+/// names the `record.exe` in its own folder.
+fn tray_program(current: &Path) -> Result<PathBuf, String> {
+    let is_record = current
+        .file_stem()
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("record"));
+    if is_record {
+        return Ok(current.to_path_buf());
+    }
+    let sibling = current.with_file_name("record.exe");
+    if sibling.is_file() {
+        Ok(sibling)
+    } else {
+        Err(format!(
+            "the tray needs record.exe in {}",
+            current.parent().unwrap_or(current).display()
+        ))
+    }
 }
 
 /// Adds or removes the sign-in entry that starts the tray process.
@@ -161,10 +203,11 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
     if !cfg!(windows) {
         return Err("starting at sign-in is available on Windows only".to_owned());
     }
-    let mut command = Command::new("reg");
+    let mut command = registry_tool();
     if enabled {
-        let program = std::env::current_exe()
+        let current = std::env::current_exe()
             .map_err(|error| format!("could not find the record executable: {error}"))?;
+        let program = tray_program(&current)?;
         let line = format!("\"{}\" screenshot --tray", program.display());
         command.args([
             "add",
@@ -237,5 +280,16 @@ mod tests {
         assert_eq!(parse_sdr_white("Auto"), Ok(None));
         assert_eq!(parse_sdr_white("240"), Ok(Some(240.0)));
         assert!(parse_sdr_white("50").is_err());
+    }
+
+    #[test]
+    fn the_sign_in_entry_starts_record_and_not_the_desktop_program() {
+        let folder = tempfile::tempdir().unwrap();
+        let record = folder.path().join("record.exe");
+        assert_eq!(tray_program(&record), Ok(record.clone()));
+        let desktop = folder.path().join("record-desktop.exe");
+        assert!(tray_program(&desktop).unwrap_err().contains("record.exe"));
+        fs::write(&record, b"").unwrap();
+        assert_eq!(tray_program(&desktop), Ok(record));
     }
 }

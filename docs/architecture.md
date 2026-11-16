@@ -8,7 +8,7 @@ The repository is a Cargo workspace.
 |---|---|---|
 | `record-core` | `crates/record-core` | The capture engines: audio, video, screenshots, uploads, stored settings, and the shared color theme. It has no user interface |
 | `record-tui` | the repository root | The `record` executable: command-line parsing and the terminal interface |
-| `record-desktop` | `crates/record-desktop` | The `record-desktop` executable: the egui dashboard |
+| `record-desktop` | `crates/record-desktop` | The `record-desktop` executable: the Tauri window and its web interface |
 
 A user interface sends requests to an engine and draws the events that come back. It does not own capture state. This rule lets the terminal program and the desktop program use the same engines.
 
@@ -154,10 +154,18 @@ The saved PNG and the clipboard bitmap come from the annotated image, cropped to
 
 The `upload` module reads ShareX custom uploader files, builds the request body, and reads the link from the response. It has no Windows dependency and no network access. The `http` module sends the request with WinHTTP, which uses the system proxy settings and certificate store.
 
-## Desktop dashboard
+## Desktop program
 
-The dashboard redraws the complete window from its state on every frame, like the terminal interface. Its `backend` module defines plain request and update types and an `Engines` trait. The dashboard code depends only on that boundary, so tests draw real frames with stand-in engines and no window.
+The desktop program is a Tauri window. The engines stay in Rust, and the interface is a web page in `crates/record-desktop/ui` that Tauri embeds in the executable.
 
-The `engines` module implements the boundary with `record-core`. Each recording runs on its own thread. A second thread translates engine events to updates, so capture never waits for drawing. The screenshot panel uses the same hub thread as the terminal hub.
+The interface never touches a file or a device. It calls the functions of the `commands` module and listens for three events: `sound`, `video`, and `shots`. The `payload` module defines every value that crosses this boundary, and `ui/src/types.ts` mirrors it.
 
-The `theme` module builds the egui style from the palette in `record-core`, which the terminal interface also uses.
+The `engines` module runs the recordings. Each recording runs on its own thread. A second thread translates engine events to updates, so capture never waits for drawing. An audio update carries the extent of one sample block and 24 spectrum bands, about 47 times each second. The live picture of a video recording does not travel as an event. The interface asks for the newest picture when it is ready to draw one.
+
+Every command runs away from the window thread. A command that receives a path accepts it only when the file lies in one of the three output folders.
+
+The screenshot screen uses the same hub thread as the terminal hub. The window minimizes before a capture that it started and returns when the capture ends.
+
+A recording that runs when the window closes saves its file first. The window closes when the engine reports the end of the recording.
+
+The interface is TypeScript without a framework. `main.ts` holds the state and the screens, `menu.ts` the menu bar, `draw.ts` the canvas drawing, and `bridge.ts` the calls into Rust. The address of a screen is a hash route such as `#/audio`. `demo.ts` is a simulation of the engines for a plain browser, so the interface can be seen and tested without Windows. The colors are the palette of `record-core`, which the terminal interface also uses.

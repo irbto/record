@@ -6,8 +6,10 @@ This file gives the important project changes. The project uses [Semantic Versio
 
 ### Added
 
-- `record-desktop` is a desktop dashboard for sound, video, and screenshots in
-  one window. A switcher and the keys `1`, `2`, and `3` select the mode.
+- `record-desktop` is a desktop program for system audio, screen capture, and
+  screenshots in one window. A home screen selects the mode, tabs switch
+  between the screens, and a menu bar holds every command. It is built with
+  Tauri and looks like the terminal screens.
 - The capture engines are a separate `record-core` crate without a user
   interface.
 
