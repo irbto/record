@@ -1,6 +1,7 @@
 // The two editors: trim one audio clip, and trim, fade, and crop one video.
 
 import * as draw from "./draw";
+import { commandFor, comboOf, keysOf, type Command } from "./keys";
 import type { Bridge, ClipShape, EditUpdate, Save, VideoInfo } from "./types";
 
 type Child = Node | string | null | false;
@@ -17,7 +18,7 @@ export interface Host {
   /** Called when a clip changed its length. */
   clipTrimmed(path: string, seconds: number): void;
   /** Called when a video was written again. */
-  videoSaved(): void;
+  videoSaved(path: string): void;
 }
 
 let host: Host;
@@ -160,11 +161,11 @@ export async function openClipEditor(save: Save): Promise<void> {
 type Tool = "range" | "videoFade" | "audioFade" | "crop";
 const icon = (path: string) => `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="${path}"/></svg>`;
 /** Each tool with its name, its key, and its picture. */
-const tools: { tool: Tool; label: string; key: string; icon: string }[] = [
-  { tool: "range", label: "Range", key: "T", icon: icon("M5 3H3v10h2M11 3h2v10h-2M6 8h4") },
-  { tool: "videoFade", label: "Video fade", key: "V", icon: icon("M2 3h12v10H2zM3 12l10-8") },
-  { tool: "audioFade", label: "Audio fade", key: "A", icon: icon("M2 9v-1M5 10V7M8 11V6M11 12V5M14 13V4") },
-  { tool: "crop", label: "Crop", key: "C", icon: icon("M4 1v11h11M1 4h11v11") },
+const tools: { tool: Tool; label: string; command: Command; icon: string }[] = [
+  { tool: "range", label: "Range", command: "toolRange", icon: icon("M5 3H3v10h2M11 3h2v10h-2M6 8h4") },
+  { tool: "videoFade", label: "Video fade", command: "toolVideoFade", icon: icon("M2 3h12v10H2zM3 12l10-8") },
+  { tool: "audioFade", label: "Audio fade", command: "toolAudioFade", icon: icon("M2 9v-1M5 10V7M8 11V6M11 12V5M14 13V4") },
+  { tool: "crop", label: "Crop", command: "toolCrop", icon: icon("M4 1v11h11M1 4h11v11") },
 ];
 
 /** A level that is constant, or that follows keyframes. Values run from 0 to 1. */
@@ -224,10 +225,17 @@ interface VideoState {
 
 let video: VideoState | null = null;
 
-/** Reports whether the video editor covers the screen capture screen. */
+/** Reports whether a video is open in the editor of the screen capture screen. */
 export function videoEditorOpen(): boolean {
   return video !== null;
 }
+
+/** The video that is open in the editor. */
+export function videoEditorInfo(): VideoInfo | null {
+  return video?.info ?? null;
+}
+
+const shown = () => $("video").classList.contains("on");
 
 function fresh(info: VideoInfo): VideoState {
   return {
@@ -282,7 +290,7 @@ function seek(frame: number): void {
 
 function paintVideo(): void {
   const state = video;
-  if (!state || !$("editor").classList.contains("on")) return;
+  if (!state || !shown()) return;
   const canvas = $<HTMLCanvasElement>("editor-picture");
   draw.contain(canvas, state.picture, state.picture?.width ?? 0, state.picture?.height ?? 0);
   // The picture is smaller than the video, so the crop scales with it.
@@ -364,7 +372,7 @@ function syncFields(): void {
 function renderVideoEditor(): void {
   const state = video;
   if (!state) return;
-  const { h, bridge } = host;
+  const { h } = host;
   const { info } = state;
   const busy = Boolean(state.exporting);
   const button = (id: string, className: string, label: string, enabled: boolean, action: () => void) => {
@@ -377,7 +385,7 @@ function renderVideoEditor(): void {
   const face = (one: (typeof tools)[number], key: boolean) => {
     const picture = h("span", { className: "tool-icon" });
     picture.innerHTML = one.icon;
-    return [picture, h("span", { textContent: one.label }), h("kbd", { textContent: key ? one.key : "▾" })];
+    return [picture, h("span", { textContent: one.label }), h("kbd", { textContent: key ? keysOf(one.command) : "▾" })];
   };
   const toolButton = h("button", { type: "button", id: "editor-tool", disabled: busy, title: "Tool" }, ...face(current, false));
   const toolList = h("div", { className: "items" });
@@ -393,9 +401,9 @@ function renderVideoEditor(): void {
   }
   $("editor-bar").replaceChildren(
     tool,
-    h("span", { className: "clock", textContent: info.name }),
-    h("span", { className: "facts", textContent: busy ? state.exporting : `${info.width}x${info.height} ${info.fps} fps ${stamp(info.frames / info.fps)}` }),
-    h("span", { className: "spacer" }),
+    h("span", { className: "facts", id: "editor-facts", textContent: state.exporting }),
+  );
+  $("editor-actions").replaceChildren(
     button("edit-save", "save", "Save", !busy, () => void exportVideo()),
     button("edit-reset", "", "Reset", !busy, () => {
       const bins = state.bins;
@@ -403,10 +411,8 @@ function renderVideoEditor(): void {
       video = { ...fresh(info), tool: state.tool, playhead: state.playhead, bins, picture, wanted: null };
       renderVideoEditor();
     }),
-    button("edit-reveal", "", "Show in folder", true, () => void bridge.reveal(info.path).catch(host.fail)),
     button("edit-close", "", "Close", !busy, () => void closeVideoEditor()),
   );
-  $("editor-title").textContent = `Edit · ${info.name}`;
   const fields = $("editor-fields");
   fields.replaceChildren();
   const field = (label: string, value: number, limit: number, step: number, set: (value: number) => void) => {
@@ -420,6 +426,7 @@ function renderVideoEditor(): void {
     });
     fields.append(h("div", { className: "field" }, h("label", { htmlFor: input.id, textContent: label }), input));
   };
+  fields.append(h("div", { className: "field info" }, h("span", { textContent: "Clip" }), h("span", { textContent: `${info.width}x${info.height} · ${info.fps} fps · ${stamp(info.frames / info.fps)}` })));
   // A level has a value and three keyframe buttons: previous, set, next.
   for (const [name, label] of levelNames) {
     const level = state.levels[name];
@@ -515,7 +522,7 @@ function onEdit(update: EditUpdate): void {
       void loadWaveform();
       void loadPicture();
     } else video = null;
-    host.videoSaved();
+    host.videoSaved(state.info.path);
     host.render();
     return;
   }
@@ -614,6 +621,12 @@ export async function closeVideoEditor(): Promise<void> {
   if (!video || video.exporting) return;
   video.picture?.close();
   video = null;
+  // An empty timeline and an empty viewer stay behind.
+  for (const id of ["editor-timeline", "editor-picture"]) {
+    const canvas = $<HTMLCanvasElement>(id);
+    canvas.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
+  }
+  $("editor-empty").hidden = true;
   host.render();
   await host.bridge.closeVideoEditor().catch(host.fail);
 }
@@ -675,14 +688,16 @@ export function setupEditors(context: Host): void {
   document.addEventListener("keydown", (event) => {
     const state = video;
     const typing = event.target instanceof HTMLInputElement;
-    if (!state || typing || state.exporting || !$("editor").classList.contains("on") || document.querySelector("dialog[open]")) return;
+    if (!state || typing || state.exporting || !shown() || document.querySelector("dialog[open], .menu.open, .popover:not([hidden])")) return;
+    // Shift makes a frame step one second long.
+    const command = commandFor(comboOf(event)) ?? (event.shiftKey ? commandFor(comboOf(event, false)) : null);
     const step = event.shiftKey ? state.info.fps : 1;
-    const picked = event.ctrlKey || event.altKey ? undefined : tools.find((one) => one.key.toLowerCase() === event.key.toLowerCase());
+    const picked = tools.find((one) => one.command === command);
     if (picked) {
       state.tool = picked.tool;
       renderVideoEditor();
-    } else if (event.key === "ArrowLeft") seek(state.playhead - step);
-    else if (event.key === "ArrowRight") seek(state.playhead + step);
+    } else if (command === "frameBack") seek(state.playhead - step);
+    else if (command === "frameForward") seek(state.playhead + step);
     else if (event.key === "Escape") void closeVideoEditor();
     else return;
     event.preventDefault();

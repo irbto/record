@@ -40,9 +40,21 @@ export function desktopBridge(): Bridge | null {
     capture: (mode, delayed) => invoke("capture", { mode, delayed }),
     toggleAuto: () => invoke("toggle_auto"),
     monitors: () => invoke("monitors"),
-    startRecording: (mode, monitor, fps) => invoke("start_recording", { mode, monitor, fps }),
-    stopRecording: () => invoke("stop_recording"),
-    setPaused: (paused) => invoke("set_paused", { paused }),
+    startRecording: (mode, options = {}) => invoke("start_recording", { mode, ...options }),
+    stopRecording: (mode) => invoke("stop_recording", { mode }),
+    setPaused: (mode, paused) => invoke("set_paused", { mode, paused }),
+    discardRecording: (mode) => invoke("discard_recording", { mode }),
+    selectRegion: () => invoke("select_region"),
+    setHotkey: (id, keys) => invoke("set_hotkey", { id, keys }),
+    setHotkeyEnabled: (id, enabled) => invoke("set_hotkey_enabled", { id, enabled }),
+    uiSettings: () => invoke("ui_settings"),
+    setUiSettings: (json) => invoke("set_ui_settings", { json }),
+    async thumbnail(path, edge) {
+      const bytes = bytesOf(await invoke<unknown>("thumbnail", { path, edge }));
+      if (!bytes || !bytes.byteLength) throw "The thumbnail is empty";
+      return new Blob([bytes]);
+    },
+    deleteFile: (path) => invoke("delete_file", { path }),
     async monitorPreview({ left, top, width, height }) {
       const bytes = bytesOf(await invoke<unknown>("monitor_preview", { left, top, width, height }));
       if (!bytes || !bytes.byteLength) throw "The preview is empty";

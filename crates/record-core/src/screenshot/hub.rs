@@ -5,6 +5,9 @@
 //! and the thread runs one capture at a time. The region overlay opens its
 //! window on the same thread. Requests that arrive during a capture are
 //! dropped, so a held key cannot stack captures.
+//!
+//! The hotkeys come from the settings. A request registers them again after
+//! a change, and each registration reports the state of every hotkey.
 
 use std::{
     mem, ptr,
@@ -27,7 +30,7 @@ use windows::{
         },
         UI::{
             Input::KeyboardAndMouse::{
-                MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey, VK_SNAPSHOT,
+                HOT_KEY_MODIFIERS, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey,
             },
             Shell::{
                 NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
@@ -51,6 +54,7 @@ use super::{
     CaptureMode, ScreenshotConfig,
     canvas::{Area, Canvas, rgb},
     events::{CaptureHub, HubEvent, HubRequest, HubSettings},
+    hotkeys::{HotkeyId, hotkey_states},
     last_region, overlay, take_screenshot, unique_output_path,
 };
 use crate::video::video_timestamp;
@@ -72,6 +76,68 @@ const CODE_DELAYED: usize = 0x10;
 const CODE_AUTO: usize = 0x20;
 /// Request code that the tray menu sends to stop the hub.
 const CODE_QUIT: usize = 0x40;
+/// Request code that registers the hotkeys again from the settings.
+const CODE_HOTKEYS: usize = 0x80;
+
+/// Returns the registration number of one hotkey.
+const fn hotkey_number(id: HotkeyId) -> i32 {
+    id.index() as i32 + 1
+}
+
+/// Finds the hotkey of a registration number from a `WM_HOTKEY` message.
+fn numbered_hotkey(number: usize) -> Option<HotkeyId> {
+    HotkeyId::ALL.get(number.wrapping_sub(1)).copied()
+}
+
+/// Returns the screenshot that a hotkey takes. A video hotkey takes none.
+const fn hotkey_mode(id: HotkeyId) -> Option<CaptureMode> {
+    match id {
+        HotkeyId::Region => Some(CaptureMode::Region),
+        HotkeyId::Fullscreen => Some(CaptureMode::Fullscreen),
+        HotkeyId::Window => Some(CaptureMode::Window),
+        HotkeyId::VideoRegion | HotkeyId::VideoFullscreen => None,
+    }
+}
+
+/// Registers every wanted hotkey of the settings on the calling thread.
+///
+/// Hotkeys that `registered` marks are released first. The video hotkeys
+/// stay free unless `video` is set. Returns the result for each hotkey.
+///
+/// # Safety
+///
+/// The calling thread must own the hotkeys that `registered` marks.
+unsafe fn register_hotkeys(
+    settings: &HubSettings,
+    video: bool,
+    registered: [bool; 5],
+) -> [bool; 5] {
+    let bindings = settings.hotkeys();
+    for id in HotkeyId::ALL {
+        if registered[id.index()] {
+            // SAFETY: This thread registered the hotkey with this number.
+            let _ = unsafe { UnregisterHotKey(None, hotkey_number(id)) };
+        }
+    }
+    HotkeyId::ALL.map(|id| {
+        let binding = bindings[id.index()];
+        if !binding.enabled || (id.is_video() && !video) {
+            return false;
+        }
+        let modifiers = HOT_KEY_MODIFIERS(binding.chord.modifiers()) | MOD_NOREPEAT;
+        // SAFETY: The call has no pointer arguments. A chord that another
+        // program holds only makes it fail.
+        unsafe {
+            RegisterHotKey(
+                None,
+                hotkey_number(id),
+                modifiers,
+                u32::from(binding.chord.key),
+            )
+        }
+        .is_ok()
+    })
+}
 
 /// Converts a capture mode to its request code.
 const fn mode_code(mode: CaptureMode) -> usize {
@@ -105,8 +171,21 @@ pub struct Hub {
 }
 
 impl Hub {
-    /// Starts the capture thread and registers the global hotkeys.
+    /// Starts the capture thread and registers the screenshot hotkeys.
     pub fn start(settings: Arc<HubSettings>) -> Result<Self> {
+        Self::start_thread(settings, false)
+    }
+
+    /// Starts the capture thread and registers every hotkey.
+    ///
+    /// The thread reports a video hotkey as [`HubEvent::VideoHotkey`] and
+    /// leaves the recording to the caller.
+    pub fn start_with_video(settings: Arc<HubSettings>) -> Result<Self> {
+        Self::start_thread(settings, true)
+    }
+
+    /// Starts the capture thread. `video` also registers the video hotkeys.
+    fn start_thread(settings: Arc<HubSettings>, video: bool) -> Result<Self> {
         let (event_sender, events) = bounded(64);
         let (id_sender, id_receiver) = bounded(1);
         let busy = Arc::new(AtomicBool::new(false));
@@ -119,6 +198,7 @@ impl Hub {
                     &event_sender,
                     &thread_busy,
                     false,
+                    video,
                     Some(&id_sender),
                 );
             })
@@ -152,6 +232,7 @@ impl CaptureHub for Hub {
             HubRequest::Capture(mode) => mode_code(mode),
             HubRequest::Delayed(mode) => mode_code(mode) | CODE_DELAYED,
             HubRequest::ToggleAuto => CODE_AUTO,
+            HubRequest::ReloadHotkeys => CODE_HOTKEYS,
         };
         self.post(WM_HUB_REQUEST, code);
     }
@@ -190,7 +271,14 @@ pub fn tray_is_running() -> bool {
 /// Returns when the user selects Quit in the tray menu.
 pub fn run_tray(settings: &HubSettings) {
     let (events, _unread) = bounded(1);
-    message_loop(settings, &events, &AtomicBool::new(false), true, None);
+    message_loop(
+        settings,
+        &events,
+        &AtomicBool::new(false),
+        true,
+        false,
+        None,
+    );
 }
 
 /// Registers hotkeys, optionally shows the tray icon, and serves requests.
@@ -199,6 +287,7 @@ fn message_loop(
     events: &Sender<HubEvent>,
     busy: &AtomicBool,
     tray: bool,
+    video: bool,
     ready: Option<&Sender<u32>>,
 ) {
     overlay::enable_dpi_awareness();
@@ -214,14 +303,13 @@ fn message_loop(
         if let Some(ready) = ready {
             let _ = ready.send(GetCurrentThreadId());
         }
-        let print_screen = u32::from(VK_SNAPSHOT.0);
-        let hotkeys = [
-            RegisterHotKey(None, 1, MOD_CONTROL | MOD_NOREPEAT, print_screen).is_ok(),
-            RegisterHotKey(None, 3, MOD_NOREPEAT, print_screen).is_ok(),
-            RegisterHotKey(None, 4, MOD_ALT | MOD_NOREPEAT, print_screen).is_ok(),
-        ];
+        let mut hotkeys = register_hotkeys(settings, video, [false; 5]);
         let tray_icon = if tray { TrayIcon::show() } else { None };
-        report(HubEvent::Ready(hotkeys));
+        report(HubEvent::Ready([hotkeys[0], hotkeys[1], hotkeys[2]]));
+        report(HubEvent::Hotkeys(hotkey_states(
+            &settings.hotkeys(),
+            hotkeys,
+        )));
         let mut auto_timer = 0_usize;
         while GetMessageW(&mut message, None, 0, 0).0 > 0 {
             if !message.hwnd.is_invalid() {
@@ -232,7 +320,14 @@ fn message_loop(
             let code = message.wParam.0;
             let (mode, delayed) = match message.message {
                 WM_HUB_QUIT => break,
-                WM_HOTKEY => (code_mode(code), false),
+                WM_HOTKEY => match numbered_hotkey(code) {
+                    Some(id) if id.is_video() => {
+                        report(HubEvent::VideoHotkey(id));
+                        (None, false)
+                    }
+                    Some(id) => (hotkey_mode(id), false),
+                    None => (None, false),
+                },
                 WM_TIMER if auto_timer != 0 && code == auto_timer => {
                     let mode = if last_region().is_some() {
                         CaptureMode::LastRegion
@@ -244,6 +339,14 @@ fn message_loop(
                 WM_HUB_REQUEST if code == CODE_QUIT => {
                     report(HubEvent::QuitRequested);
                     break;
+                }
+                WM_HUB_REQUEST if code == CODE_HOTKEYS => {
+                    hotkeys = register_hotkeys(settings, video, hotkeys);
+                    report(HubEvent::Hotkeys(hotkey_states(
+                        &settings.hotkeys(),
+                        hotkeys,
+                    )));
+                    (None, false)
                 }
                 WM_HUB_REQUEST if code == CODE_AUTO => {
                     if auto_timer == 0 {
@@ -291,7 +394,9 @@ fn message_loop(
                 Err(error) => HubEvent::Failed(format!("{error:#}")),
             });
             busy.store(false, Ordering::Relaxed);
-            // Drop the input that arrived during the capture.
+            // Drop the input that arrived during the capture. A change of
+            // the hotkeys is not input, so it still applies.
+            let mut reload = false;
             for kind in [WM_HOTKEY, WM_TIMER, WM_HUB_REQUEST] {
                 while PeekMessageW(
                     &mut message,
@@ -301,14 +406,26 @@ fn message_loop(
                     PM_REMOVE,
                 )
                 .as_bool()
-                {}
+                {
+                    reload |= kind == WM_HUB_REQUEST && message.wParam.0 == CODE_HOTKEYS;
+                }
+            }
+            if reload {
+                let _ = PostThreadMessageW(
+                    GetCurrentThreadId(),
+                    WM_HUB_REQUEST,
+                    WPARAM(CODE_HOTKEYS),
+                    LPARAM(0),
+                );
             }
         }
         if auto_timer != 0 {
             let _ = KillTimer(None, auto_timer);
         }
-        for id in [1, 3, 4] {
-            let _ = UnregisterHotKey(None, id);
+        for id in HotkeyId::ALL {
+            if hotkeys[id.index()] {
+                let _ = UnregisterHotKey(None, hotkey_number(id));
+            }
         }
         drop(tray_icon);
     }

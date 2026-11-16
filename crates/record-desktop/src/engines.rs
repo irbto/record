@@ -68,11 +68,16 @@ fn prepare(output: &Path) -> Result<(), String> {
     }
 }
 
-/// Splits an engine result into the file name and the failure text.
-fn outcome(result: Result<PathBuf, String>) -> (Option<String>, Option<String>) {
+/// Splits an engine result into the file name, the full path, and the
+/// failure text.
+fn outcome(result: Result<PathBuf, String>) -> (Option<String>, Option<String>, Option<String>) {
     match result {
-        Ok(path) => (Some(file_name(&path)), None),
-        Err(error) => (None, Some(error)),
+        Ok(path) => (
+            Some(file_name(&path)),
+            Some(path.display().to_string()),
+            None,
+        ),
+        Err(error) => (None, None, Some(error)),
     }
 }
 
@@ -160,24 +165,33 @@ pub fn start_sound(
                 .map_err(|error| format!("{error:#}"));
             drop(events);
             let _ = translator.join();
-            let (file, error) = outcome(result);
-            report(SoundUpdate::Stopped { file, error });
+            let (file, path, error) = outcome(result);
+            report(SoundUpdate::Stopped {
+                file,
+                path,
+                error,
+                discarded: false,
+            });
         });
     if let Err(error) = started {
         report(SoundUpdate::Stopped {
             file: None,
+            path: None,
             error: Some(format!("could not start the audio thread: {error}")),
+            discarded: false,
         });
     }
 }
 
 /// Starts a video recording of one monitor on a new thread.
 ///
-/// `saved` receives the encoding of the finished file. The last update is
-/// always `Stopped`.
+/// `crop` selects a part of the monitor in its own pixels. The default value
+/// records the whole monitor. `saved` receives the encoding of the finished
+/// file. The last update is always `Stopped`.
 pub fn start_video(
     output: PathBuf,
     monitor: u32,
+    crop: CropRect,
     fps: u32,
     control: &Control,
     saved: Arc<dyn Fn(&VideoSummary) + Send + Sync>,
@@ -207,7 +221,7 @@ pub fn start_video(
             let result = prepare(&output).and_then(|()| {
                 let config = VideoConfig {
                     source: VideoSource::Index(monitor),
-                    crop: CropRect::default(),
+                    crop,
                     fit: FitMode::default(),
                     canvas_width: 0,
                     canvas_height: 0,
@@ -231,13 +245,20 @@ pub fn start_video(
             });
             drop(events);
             let _ = translator.join();
-            let (file, error) = outcome(result);
-            report(VideoUpdate::Stopped { file, error });
+            let (file, path, error) = outcome(result);
+            report(VideoUpdate::Stopped {
+                file,
+                path,
+                error,
+                discarded: false,
+            });
         });
     if let Err(error) = started {
         report(VideoUpdate::Stopped {
             file: None,
+            path: None,
             error: Some(format!("could not start the video thread: {error}")),
+            discarded: false,
         });
     }
 }

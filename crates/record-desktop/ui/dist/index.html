@@ -28,71 +28,81 @@
   </header>
 
   <header class="tabs">
-    <a class="brand" href="#/" aria-label="record, home">record</a>
+    <span class="brand">record</span>
     <nav class="tablist" role="tablist" aria-label="Screens">
-      <a class="tab" role="tab" href="#/" data-route="home">Home</a>
-      <a class="tab" role="tab" href="#/audio" data-route="audio">System audio<span class="live" aria-hidden="true">●</span></a>
-      <a class="tab" role="tab" href="#/video" data-route="video">Screen capture<span class="live" aria-hidden="true">●</span></a>
-      <a class="tab" role="tab" href="#/screenshot" data-route="screenshot">Screenshot<span class="live" aria-hidden="true">●</span></a>
+      <a class="tab" role="tab" href="#/" data-route="home"></a>
+      <a class="tab" role="tab" href="#/audio" data-route="audio"></a>
+      <a class="tab" role="tab" href="#/video" data-route="video"></a>
+      <a class="tab" role="tab" href="#/screenshot" data-route="screenshot"></a>
     </nav>
-    <a class="now" id="now" href="#/audio" hidden></a>
+    <!-- What records now. The panel lists each recording with its controls. -->
+    <div class="activity-wrap">
+      <button type="button" class="activity" id="activity" aria-haspopup="true" aria-controls="activity-panel" data-id="activity"><span id="activity-count"></span></button>
+      <div class="panel popover" id="activity-panel" hidden><span class="title">Activity</span><div class="body" id="activity-list"></div></div>
+    </div>
   </header>
 
   <main>
     <!-- Home. -->
     <section class="view" id="home" aria-label="Home">
       <div class="choices">
-        <a class="panel choice cyan" href="#/audio">
+        <a class="panel choice cyan" href="#/audio" data-mode="audio">
           <span class="title">System audio</span>
           <canvas id="art-audio" aria-hidden="true"></canvas>
           <strong>Record audio</strong>
           <span class="meta"><span>MP3 320 kbps</span><kbd>Ctrl+1</kbd></span>
         </a>
-        <a class="panel choice green" href="#/video">
+        <a class="panel choice green" href="#/video" data-mode="video">
           <span class="title">Screen capture</span>
           <canvas id="art-video" aria-hidden="true"></canvas>
           <strong>Record video</strong>
           <span class="meta"><span>H.264 AAC</span><kbd>Ctrl+2</kbd></span>
         </a>
-        <a class="panel choice purple" href="#/screenshot">
+        <a class="panel choice purple" href="#/screenshot" data-mode="screenshot">
           <span class="title">Screenshot</span>
           <canvas id="art-shot" aria-hidden="true"></canvas>
           <strong>Screenshot</strong>
           <span class="meta"><span id="card-format">PNG</span><kbd>Ctrl+3</kbd></span>
         </a>
       </div>
-      <div class="panel recent"><span class="title">Recent files</span><div class="body rows scroll" id="recent"></div></div>
-      <div class="panel hotkeys"><span class="title">Global hotkeys</span><div class="body rows" id="hotkeys"></div></div>
+      <div class="panel browser recent"><span class="title">Recent files</span><div class="tools" id="recent-tools"></div><div class="body scroll files" id="recent"></div></div>
+      <div class="panel hotkeys"><span class="title">Global hotkeys</span><div class="tools" id="hotkeys-tools"></div><div class="body rows" id="hotkeys"></div></div>
     </section>
 
-    <!-- System audio. -->
+    <!-- System audio: the scopes and the levels, the files underneath. -->
     <section class="view" id="audio" aria-label="System audio">
       <div class="transport" id="transport-audio"></div>
       <div class="panel cyan scope-left"><span class="title">Left</span><div class="body"><canvas id="scope-left"></canvas></div></div>
       <div class="panel green scope-right"><span class="title">Right</span><div class="body"><canvas id="scope-right"></canvas></div></div>
       <div class="panel purple spectrum"><span class="title">Spectrum</span><div class="body"><canvas id="spectrum"></canvas></div></div>
-      <div class="panel files"><span class="title" id="audio-files-title">Recordings</span><div class="body rows scroll" id="audio-files"></div></div>
       <div class="meters">
         <div class="meter cyan"><span>L</span><span class="db" id="db-left"></span><div class="track"><i id="bar-left"></i></div></div>
         <div class="meter green"><span>R</span><span class="db" id="db-right"></span><div class="track"><i id="bar-right"></i></div></div>
       </div>
+      <div class="panel browser pool"><span class="title" id="audio-files-title">Recordings</span><div class="tools" id="audio-tools"></div><div class="body scroll files" id="audio-files"></div></div>
     </section>
 
-    <!-- Screen capture. -->
+    <!-- Screen capture: the viewer, the source or the inspector beside it,
+         the timeline under it, and the media pool at the bottom. -->
     <section class="view" id="video" aria-label="Screen capture">
       <div class="transport" id="transport-video"></div>
-      <div class="panel green picture"><span class="title" id="picture-title">Preview</span><div class="body"><canvas id="desktop"></canvas><p class="empty" id="desktop-empty"></p></div></div>
-      <div class="panel"><span class="title">Source</span><div class="body rows" id="sources"></div></div>
-      <div class="panel"><span class="title">Output</span><div class="body rows" id="video-settings"></div></div>
-      <div class="panel files"><span class="title" id="video-files-title">Recordings</span><div class="body rows scroll" id="video-files"></div></div>
-    </section>
-
-    <!-- Video editor. It covers the screen capture screen while a video is open. -->
-    <section class="view" id="editor" aria-label="Video editor">
-      <div class="transport" id="editor-bar"></div>
-      <div class="panel green picture"><span class="title" id="editor-title">Edit</span><div class="body"><canvas id="editor-picture"></canvas><p class="empty" id="editor-empty" hidden></p></div></div>
-      <div class="panel fields"><span class="title">Inspector</span><div class="body scroll" id="editor-fields"></div></div>
-      <div class="panel purple timeline"><span class="title" id="editor-range">Range</span><div class="body"><canvas id="editor-timeline"></canvas></div></div>
+      <div class="panel green picture">
+        <span class="title" id="picture-title">Viewer</span>
+        <div class="body">
+          <canvas id="desktop" class="live-only"></canvas>
+          <canvas id="editor-picture" class="edit-only"></canvas>
+          <p class="empty" id="desktop-empty" hidden></p>
+          <p class="empty" id="editor-empty" hidden></p>
+        </div>
+      </div>
+      <div class="side">
+        <div class="panel live-only"><span class="title">Source</span><div class="body rows" id="sources"></div></div>
+        <div class="panel live-only"><span class="title">Output</span><div class="body rows" id="video-settings"></div></div>
+        <div class="transport edit-only" id="editor-bar"></div>
+        <div class="panel fields edit-only"><span class="title">Inspector</span><div class="body scroll" id="editor-fields"></div><div class="actions" id="editor-actions"></div></div>
+      </div>
+      <div class="panel purple timeline"><span class="title" id="editor-range">Timeline</span><div class="body"><canvas id="editor-timeline"></canvas><p class="empty" id="timeline-empty">No clip</p></div></div>
+      <div class="panel browser pool"><span class="title" id="video-files-title">Media pool</span><div class="tools" id="video-tools"></div><div class="body scroll files" id="video-files"></div></div>
     </section>
 
     <!-- Screenshot. -->
@@ -110,7 +120,7 @@
 
   <footer class="status">
     <span id="message" role="status"></span>
-    <button class="path" id="output" title="Ctrl+O"></button>
+    <button type="button" class="path" id="output" data-id="output"><span id="output-text"></span></button>
   </footer>
 </div>
 

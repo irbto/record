@@ -11,6 +11,7 @@ use std::{
 
 use super::{
     format::ImageFormat,
+    hotkeys::{Bindings, Chord, HotkeyId, default_bindings},
     upload::{settings_directory, write_setting},
 };
 
@@ -42,7 +43,14 @@ pub struct SavedSettings {
     pub primary_monitor: bool,
     /// SDR white level for HDR monitors in nits. `None` asks Windows.
     pub sdr_white_nits: Option<f32>,
+    /// The global hotkeys.
+    pub hotkeys: Bindings,
+    /// Seconds that the desktop program waits before a recording starts.
+    pub countdown_seconds: u32,
 }
+
+/// Longest countdown before a recording, in seconds.
+pub const COUNTDOWN_LIMIT: u32 = 60;
 
 impl Default for SavedSettings {
     fn default() -> Self {
@@ -56,7 +64,25 @@ impl Default for SavedSettings {
             interval_seconds: 5.0,
             primary_monitor: false,
             sdr_white_nits: None,
+            hotkeys: default_bindings(),
+            countdown_seconds: 0,
         }
+    }
+}
+
+/// Parses the countdown before a recording. An empty text turns it off.
+pub fn parse_countdown(text: &str) -> Result<u32, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(0);
+    }
+    match text.parse::<f64>() {
+        Ok(seconds) if (0.0..=f64::from(COUNTDOWN_LIMIT)).contains(&seconds) => {
+            Ok(seconds.round() as u32)
+        }
+        _ => Err(format!(
+            "enter a countdown from 0 to {COUNTDOWN_LIMIT} seconds"
+        )),
     }
 }
 
@@ -110,7 +136,22 @@ impl SavedSettings {
                 ("sdr_white", _) => {
                     settings.sdr_white_nits = parse_sdr_white(value).ok().flatten();
                 }
-                _ => {}
+                ("countdown", _) => {
+                    settings.countdown_seconds =
+                        parse_countdown(value).unwrap_or(settings.countdown_seconds);
+                }
+                (name, flag) => {
+                    // A hotkey has two lines: its keys, and its switch with
+                    // the ending `_on`.
+                    for id in HotkeyId::ALL {
+                        let binding = &mut settings.hotkeys[id.index()];
+                        if name == id.setting() {
+                            binding.chord = Chord::parse(value).unwrap_or(binding.chord);
+                        } else if name.strip_suffix("_on") == Some(id.setting()) {
+                            binding.enabled = flag.unwrap_or(binding.enabled);
+                        }
+                    }
+                }
             }
         }
         if !settings.copy && !settings.save {
@@ -131,9 +172,9 @@ impl SavedSettings {
             .sdr_white_nits
             .map(|nits| nits.to_string())
             .unwrap_or_default();
-        format!(
+        let mut text = format!(
             "copy={}\nsave={}\nupload={}\nfolder={folder}\nformat={}\ndelay={}\ninterval={}\n\
-             primary_monitor={}\nsdr_white={sdr_white}\n",
+             primary_monitor={}\nsdr_white={sdr_white}\ncountdown={}\n",
             self.copy,
             self.save,
             self.upload,
@@ -141,7 +182,18 @@ impl SavedSettings {
             self.delay_seconds,
             self.interval_seconds,
             self.primary_monitor,
-        )
+            self.countdown_seconds,
+        );
+        for id in HotkeyId::ALL {
+            let binding = self.hotkeys[id.index()];
+            let name = id.setting();
+            text.push_str(&format!(
+                "{name}={}\n{name}_on={}\n",
+                binding.chord.to_text(),
+                binding.enabled
+            ));
+        }
+        text
     }
 
     /// Loads the stored settings, or the defaults when nothing is stored.
@@ -273,7 +325,19 @@ mod tests {
             interval_seconds: 30.0,
             primary_monitor: true,
             sdr_white_nits: Some(203.0),
+            hotkeys: {
+                let mut hotkeys = default_bindings();
+                hotkeys[0].chord = Chord::parse("Ctrl+Alt+R").unwrap();
+                hotkeys[3].enabled = false;
+                hotkeys[4].chord = Chord::parse("Win+Shift+F12").unwrap();
+                hotkeys
+            },
+            countdown_seconds: 5,
         };
+        let text = settings.to_text();
+        assert!(text.contains("hotkey_region=Ctrl+Alt+R\n"), "{text}");
+        assert!(text.contains("hotkey_video_region_on=false\n"), "{text}");
+        assert!(text.contains("countdown=5\n"), "{text}");
         assert_eq!(SavedSettings::parse(&settings.to_text()), settings);
         assert_eq!(
             SavedSettings::parse(&SavedSettings::default().to_text()),
@@ -297,7 +361,35 @@ mod tests {
     }
 
     #[test]
+    fn a_file_of_an_older_version_loads_with_the_default_hotkeys() {
+        let old = "copy=true\nsave=false\nupload=false\nfolder=D:\\Shots\nformat=jpg\n\
+                   delay=2\ninterval=9\nprimary_monitor=true\nsdr_white=\n";
+        let settings = SavedSettings::parse(old);
+        assert_eq!(settings.hotkeys, default_bindings());
+        assert_eq!(settings.countdown_seconds, 0);
+        assert_eq!(settings.format, ImageFormat::Jpeg);
+        assert!(settings.primary_monitor);
+        // A damaged hotkey line keeps the default of that hotkey.
+        let damaged = SavedSettings::parse(
+            "hotkey_window=Ctrl+Nothing\nhotkey_window_on=maybe\ncountdown=99\n\
+             hotkey_fullscreen_on=false\nhotkey_video_fullscreen = alt+f10",
+        );
+        let mut expected = default_bindings();
+        expected[1].enabled = false;
+        expected[4].chord = Chord::parse("Alt+F10").unwrap();
+        assert_eq!(damaged.hotkeys, expected);
+        assert_eq!(damaged.countdown_seconds, 0);
+    }
+
+    #[test]
     fn field_parsers_enforce_their_ranges() {
+        assert_eq!(parse_countdown(""), Ok(0));
+        assert_eq!(parse_countdown(" 3 "), Ok(3));
+        assert_eq!(parse_countdown("2.6"), Ok(3));
+        assert_eq!(parse_countdown("60"), Ok(60));
+        for text in ["-1", "61", "soon", "NaN"] {
+            assert!(parse_countdown(text).is_err(), "{text} should fail");
+        }
         assert_eq!(parse_seconds(" 2.5 "), Ok(2.5));
         for text in ["0", "-1", "4000", "soon", ""] {
             assert!(parse_seconds(text).is_err(), "{text} should fail");

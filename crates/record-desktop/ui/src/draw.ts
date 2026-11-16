@@ -179,22 +179,24 @@ function grid(
   g.globalAlpha = 1;
 }
 
-/** Home screen: a burst of sound on the dot grid. */
-export function audioArt(canvas: HTMLCanvasElement): void {
+/** Home screen: a burst of sound on the dot grid. With `time` the sound runs to the left. */
+export function audioArt(canvas: HTMLCanvasElement, time = 0): void {
+  const shift = Math.floor(time * 16);
   grid(canvas, token("--cyan"), (column, row, columns, rows) => {
     const middle = Math.floor(rows / 2);
-    const position = column / columns;
+    const position = (column + shift) / columns;
     const gate = Math.max(0, smooth(position * 5.2 + 3.1) * 1.9 - 0.5);
-    const reach = Math.round(Math.min(1, gate * (0.4 + 0.6 * noise(column * 1.7))) * (middle - 1));
+    const reach = Math.round(Math.min(1, gate * (0.4 + 0.6 * noise((column + shift) * 1.7))) * (middle - 1));
     const distance = Math.abs(row - middle);
     if (distance === 0) return 1;
     return distance <= reach ? 1 : 0;
   });
 }
 
-/** Home screen: a monitor with the recording dot. */
-export function videoArt(canvas: HTMLCanvasElement): void {
+/** Home screen: a monitor with the recording dot. With `time` the dot blinks and a pointer moves. */
+export function videoArt(canvas: HTMLCanvasElement, time = 0): void {
   const red = token("--red");
+  const lit = Math.floor(time * 2.5) % 2 === 0;
   grid(canvas, token("--green"), (column, row, columns, rows) => {
     const screenRows = Math.max(6, rows - 4);
     const screenColumns = Math.min(columns - 2, Math.round(screenRows * 1.9));
@@ -206,7 +208,13 @@ export function videoArt(canvas: HTMLCanvasElement): void {
       const edge = column === left || column === right || row === 0 || row === bottom;
       if (edge) return 1;
       const fromDot = Math.hypot(column - (right - 4), row - 3);
-      if (fromDot < 1.6) return red;
+      if (fromDot < 1.6) return lit ? red : 0.14;
+      if (time > 0) {
+        const pointerColumn = Math.round(left + screenColumns * (0.5 + 0.3 * Math.sin(time * 1.3)));
+        const pointerRow = Math.round(bottom * (0.5 + 0.25 * Math.cos(time * 1.7)));
+        if (column === pointerColumn && (row === pointerRow || row === pointerRow + 1)) return "#ffffff";
+        if (column === pointerColumn + 1 && row === pointerRow + 1) return "#ffffff";
+      }
       // Window shapes on the recorded desktop.
       const inWindow = column > left + 2 && column < left + screenColumns * 0.55 && row > 2 && row < bottom - 2;
       return inWindow && (row === 3 || column % 2 === 0) ? 0.45 : 0.14;
@@ -218,8 +226,9 @@ export function videoArt(canvas: HTMLCanvasElement): void {
   });
 }
 
-/** Home screen: a selected region on a dimmed screen. */
-export function shotArt(canvas: HTMLCanvasElement): void {
+/** Home screen: a selected region on a dimmed screen. With `time` its outline runs. */
+export function shotArt(canvas: HTMLCanvasElement, time = 0): void {
+  const run = Math.floor(time * 8);
   grid(canvas, token("--purple"), (column, row, columns, rows) => {
     const left = Math.floor(columns * 0.22);
     const right = Math.floor(columns * 0.74);
@@ -230,7 +239,7 @@ export function shotArt(canvas: HTMLCanvasElement): void {
     const onColumnEdge = column === left || column === right;
     const onRowEdge = row === top || row === bottom;
     if (onColumnEdge && onRowEdge) return "#ffffff";
-    if (onColumnEdge || onRowEdge) return 1;
+    if (onColumnEdge || onRowEdge) return time > 0 && (column + row + run) % 4 === 0 ? 0.3 : 1;
     return (column + row) % 2 === 0 ? 0.5 : 0.3;
   });
 }

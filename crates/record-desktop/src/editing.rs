@@ -153,6 +153,15 @@ pub fn updated_index(text: &str, summary: &VideoSummary) -> String {
     text
 }
 
+/// Removes one video from the text of the index.
+#[must_use]
+pub fn index_without(text: &str, path: &Path) -> String {
+    text.lines()
+        .filter(|line| parse_index_line(line).is_some_and(|other| other.output != path))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
 impl EditState {
     /// Prepares for a new audio recording that accepts clip requests.
     pub fn begin_audio(&self, clips: Sender<AudioCommand>) {
@@ -163,6 +172,23 @@ impl EditState {
     /// Forgets the clip channel of a recording that ended.
     pub fn end_audio(&self) {
         *lock(&self.clips) = None;
+    }
+
+    /// Forgets every file of the audio session, so that nothing holds the
+    /// files of a discarded recording open.
+    pub fn forget_audio(&self) {
+        if let Some(stop) = lock(&self.playing).take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        lock(&self.saves).clear();
+    }
+
+    /// Forgets the encoding of a video that no longer exists.
+    pub fn forget_video(&self, path: &Path) {
+        lock(&self.videos).remove(path);
+        if let Some(text) = read_setting(VIDEO_INDEX) {
+            let _ = write_setting(VIDEO_INDEX, &index_without(&text, path));
+        }
     }
 
     /// Remembers the encoding of a video, also for later runs.
@@ -567,6 +593,17 @@ mod tests {
             recording_ready_ms: None,
             finalize_ms: 0.0,
         }
+    }
+
+    #[test]
+    fn a_deleted_video_leaves_the_index() {
+        let first = summary(r"C:\Videos\record\a.mp4", 10);
+        let second = summary(r"C:\Videos\record\b.mp4", 20);
+        let text = updated_index(&updated_index("", &first), &second);
+        let left = index_without(&text, &first.output);
+        assert_eq!(left, format!("{}\n", index_line(&second)));
+        assert_eq!(index_without(&left, &second.output), "");
+        assert_eq!(index_without(&text, Path::new("other.mp4")), text);
     }
 
     #[test]

@@ -320,6 +320,8 @@ impl<H: CaptureHub> App<H> {
                 );
             }
             HubEvent::QuitRequested => self.quit = true,
+            // This hub shows fixed hotkeys and records no video.
+            HubEvent::Hotkeys(_) | HubEvent::VideoHotkey(_) => {}
         }
     }
 
@@ -621,6 +623,8 @@ impl<H: CaptureHub> App<H> {
             interval_seconds: options.auto_interval.as_secs_f32(),
             primary_monitor: options.monitor == MonitorChoice::Primary,
             sdr_white_nits: options.sdr_white_nits,
+            hotkeys: self.settings.hotkeys(),
+            countdown_seconds: self.settings.countdown_seconds.load(Ordering::Relaxed),
         }
         .store();
         if let Err(error) = stored {
@@ -1360,6 +1364,8 @@ mod tests {
             save: AtomicBool::new(true),
             uploader: Mutex::new(uploader),
             upload: AtomicBool::new(false),
+            hotkeys: Mutex::new(record_core::screenshot::hotkeys::default_bindings()),
+            countdown_seconds: std::sync::atomic::AtomicU32::new(0),
         });
         let hub = FakeHub {
             events,

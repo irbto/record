@@ -26,6 +26,8 @@ pub mod events;
 pub mod format;
 /// Saved screenshot files for the hub.
 pub mod history;
+/// Global hotkeys as text and as Windows key codes.
+pub mod hotkeys;
 #[cfg(windows)]
 mod http;
 /// The capture thread with global hotkeys.
@@ -34,8 +36,11 @@ pub mod hub;
 mod icons;
 #[cfg(windows)]
 mod overlay;
+#[cfg(windows)]
+mod picker;
 /// Stored defaults of the hub.
 pub mod saved;
+mod select;
 /// Upload destinations in the ShareX custom uploader format.
 pub mod upload;
 
@@ -345,6 +350,22 @@ pub fn take_screenshot(config: &ScreenshotConfig) -> anyhow::Result<Option<Scree
         hdr,
         sdr_white_nits,
     }))
+}
+
+/// Lets the user drag one rectangle on a frozen image of one monitor.
+///
+/// There is no toolbar. A mouse release or Enter confirms, and Esc cancels.
+/// Returns the rectangle in desktop pixels, or `None` after a cancel. The
+/// call blocks its thread until the user finishes.
+#[cfg(windows)]
+pub fn select_region(monitor: MonitorChoice) -> anyhow::Result<Option<DesktopRect>> {
+    picker::select_region(monitor)
+}
+
+/// Reports that the region selection is not available on this platform.
+#[cfg(not(windows))]
+pub fn select_region(_monitor: MonitorChoice) -> anyhow::Result<Option<DesktopRect>> {
+    anyhow::bail!("the region selection is available on Windows only")
 }
 
 /// Returns the largest size inside a box that keeps the shape of a picture.

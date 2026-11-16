@@ -6,13 +6,12 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use record_core::{
@@ -22,44 +21,51 @@ use record_core::{
         events::{CaptureHub, HubEvent, HubRequest, HubSettings},
         format::{ImageFormat, is_image_file, jpeg, viewable_bytes},
         history::list_history,
+        hotkeys::{Chord, HotkeyId, conflict, hotkey_states},
         hub::Hub,
         saved::{
-            SavedSettings, autostart_enabled, parse_sdr_white, parse_seconds, set_autostart_line,
+            SavedSettings, autostart_enabled, parse_countdown, parse_sdr_white, parse_seconds,
+            set_autostart_line,
         },
         upload::{
             PRESETS, Preset, import_sxcu, list_destinations, read_setting, set_default_destination,
             write_setting,
         },
     },
-    session::create_session_directory,
-    video::{enumerate_monitors, video_timestamp},
+    shell,
+    video::enumerate_monitors,
 };
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, ipc::Response};
 
 use crate::{
-    editing::{EditState, audio_saved},
-    engines::{Control, Report, default_folder, start_sound, start_video, stopping},
-    files::{FILE_LIMIT, recent_files, within},
-    payload::{
-        Destination, FileEntry, Mode, Monitor, ShotUpdate, Snapshot, SoundUpdate, VideoUpdate,
-        file_name,
-    },
+    editing::EditState,
+    engines::default_folder,
+    files::{FILE_LIMIT, file_entry, recent_files, session_within, within},
+    payload::{Destination, FileEntry, HotkeyInfo, Mode, Monitor, ShotUpdate, Snapshot, file_name},
+    recording::{self, Recordings},
+    tray::Activity,
 };
 
 /// Event that carries the updates of an audio recording.
-const SOUND_EVENT: &str = "sound";
+pub(crate) const SOUND_EVENT: &str = "sound";
 /// Event that carries the updates of a video recording.
-const VIDEO_EVENT: &str = "video";
+pub(crate) const VIDEO_EVENT: &str = "video";
 /// Event that carries the reports of the screenshot engine.
 const SHOTS_EVENT: &str = "shots";
+/// Event that carries the state of every global hotkey.
+const HOTKEYS_EVENT: &str = "hotkeys";
 /// Event that tells the interface that the window waits for a file.
 const CLOSING_EVENT: &str = "closing";
-/// Frames per second of a video recording without an explicit choice.
-const DEFAULT_FPS: u32 = 60;
 /// Label of the only window.
 const MAIN_WINDOW: &str = "main";
 /// Time that Windows needs to move a minimized window off the screen.
-const MINIMIZE_TIME: Duration = Duration::from_millis(300);
+pub(crate) const MINIMIZE_TIME: Duration = Duration::from_millis(300);
+/// Longest wait for the capture thread to register changed hotkeys.
+const HOTKEY_WAIT: Duration = Duration::from_millis(500);
+/// Settings file that holds the JSON text of the interface.
+const UI_SETTING: &str = "desktop-ui.json";
+/// Largest size of the JSON text of the interface in bytes.
+const UI_SETTING_LIMIT: usize = 64 * 1_024;
 /// Longest edge of the live monitor preview in pixels.
 const PREVIEW_EDGE: u32 = 1_280;
 /// JPEG quality of the live monitor preview.
@@ -74,19 +80,23 @@ pub const QUIT_ARGUMENT: &str = "--quit";
 /// Everything the commands share.
 pub struct AppState {
     /// Screenshot choices, shared with the capture thread.
-    settings: Arc<HubSettings>,
+    pub(crate) settings: Arc<HubSettings>,
     /// The capture thread, or the reason it did not start.
     hub: Result<Hub, String>,
-    /// The recording that runs now.
-    running: Mutex<Option<(Mode, Control)>>,
-    /// The program exits when the running recording has saved its file.
-    closing: AtomicBool,
+    /// The recordings that run now.
+    pub(crate) running: Mutex<Recordings>,
+    /// The program exits when every running recording has saved its file.
+    pub(crate) closing: AtomicBool,
+    /// The region selector is open.
+    pub(crate) selecting: AtomicBool,
     /// The close button hides the window and the program stays in the tray.
     close_to_tray: AtomicBool,
     /// Reports whether the tray starts at sign-in.
     autostart: AtomicBool,
     /// Registration result of each global hotkey.
-    hotkeys: Mutex<[bool; 3]>,
+    hotkeys: Mutex<[bool; 5]>,
+    /// Number of hotkey reports from the capture thread so far.
+    hotkey_reports: AtomicU64,
     /// Reports whether auto capture runs now.
     auto_active: AtomicBool,
     /// The window moved out of the way of a capture and must come back.
@@ -94,7 +104,7 @@ pub struct AppState {
 }
 
 /// Locks a mutex and keeps its value after a panic on another thread.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -105,17 +115,20 @@ impl AppState {
     #[must_use]
     pub fn start() -> Self {
         let settings = Arc::new(HubSettings::from_saved(&SavedSettings::load()));
-        let hub = Hub::start(Arc::clone(&settings)).map_err(|error| format!("{error:#}"));
+        let hub =
+            Hub::start_with_video(Arc::clone(&settings)).map_err(|error| format!("{error:#}"));
         Self {
             settings,
             hub,
-            running: Mutex::new(None),
+            running: Mutex::new(Recordings::default()),
             closing: AtomicBool::new(false),
+            selecting: AtomicBool::new(false),
             close_to_tray: AtomicBool::new(
                 read_setting(TRAY_SETTING).is_none_or(|text| text.trim() != "false"),
             ),
             autostart: AtomicBool::new(autostart_enabled()),
-            hotkeys: Mutex::new([false; 3]),
+            hotkeys: Mutex::new([false; 5]),
+            hotkey_reports: AtomicU64::new(0),
             auto_active: AtomicBool::new(false),
             restore: AtomicBool::new(false),
         }
@@ -123,7 +136,7 @@ impl AppState {
 
     /// Returns the folders whose files the interface may open. The flag
     /// marks the folder whose files may lie one folder deeper.
-    fn folders(&self) -> [(PathBuf, bool); 3] {
+    pub(crate) fn folders(&self) -> [(PathBuf, bool); 3] {
         [
             (self.settings.options().directory, false),
             (default_folder(Mode::Audio), true),
@@ -131,12 +144,53 @@ impl AppState {
         ]
     }
 
-    /// Returns the pause switch of the running recording.
+    /// Returns the pause switch of the running audio recording.
+    ///
+    /// The clip preview holds the audio recording with it, because the
+    /// recording would capture the clip again.
     #[must_use]
     pub fn pause_switch(&self) -> Option<Arc<AtomicBool>> {
-        lock(&self.running)
-            .as_ref()
-            .map(|(_, control)| Arc::clone(&control.paused))
+        lock(&self.running).audio_pause()
+    }
+
+    /// Reports which modes record now.
+    #[must_use]
+    pub fn activity(&self) -> Activity {
+        lock(&self.running).activity()
+    }
+
+    /// Collects the state of every global hotkey for the interface.
+    fn hotkey_infos(&self) -> Vec<HotkeyInfo> {
+        hotkey_states(&self.settings.hotkeys(), *lock(&self.hotkeys))
+            .into_iter()
+            .map(|state| HotkeyInfo {
+                id: state.id.name().to_owned(),
+                label: state.id.label().to_owned(),
+                keys: state.keys,
+                enabled: state.enabled,
+                registered: state.registered,
+            })
+            .collect()
+    }
+
+    /// Stores the hotkeys and asks the capture thread to register them.
+    ///
+    /// The call waits a moment for the result, so the returned state already
+    /// tells which hotkeys Windows gave. A `hotkeys` event follows in any
+    /// case.
+    fn apply_hotkeys(&self) -> Result<Snapshot, String> {
+        self.settings.store()?;
+        if let Ok(hub) = &self.hub {
+            let before = self.hotkey_reports.load(Ordering::Relaxed);
+            hub.request(HubRequest::ReloadHotkeys);
+            let started = Instant::now();
+            while self.hotkey_reports.load(Ordering::Relaxed) == before
+                && started.elapsed() < HOTKEY_WAIT
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        Ok(self.snapshot())
     }
 
     /// Returns the folder that holds the files of one mode.
@@ -208,7 +262,9 @@ impl AppState {
             primary_monitor: options.monitor == MonitorChoice::Primary,
             sdr_white_nits: options.sdr_white_nits,
             autostart: self.autostart.load(Ordering::Relaxed),
-            hotkeys: *lock(&self.hotkeys),
+            hotkeys: self.hotkey_infos(),
+            countdown_seconds: self.settings.countdown_seconds.load(Ordering::Relaxed),
+            running: lock(&self.running).modes(),
             auto_active: self.auto_active.load(Ordering::Relaxed),
             engine_error: self.hub.as_ref().err().cloned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -221,18 +277,18 @@ impl AppState {
         self.close_to_tray.load(Ordering::Relaxed)
     }
 
-    /// Asks the running recording to save its file before the program exits.
+    /// Asks every running recording to save its file before the program
+    /// exits.
     ///
     /// Returns `false` when nothing records, so the program can exit at once.
+    /// Otherwise the program exits when the last recording has ended.
     pub fn hold_window(&self) -> bool {
-        match &*lock(&self.running) {
-            Some((_, control)) => {
-                self.closing.store(true, Ordering::Relaxed);
-                control.stop.store(true, Ordering::Relaxed);
-                true
-            }
-            None => false,
+        let running = lock(&self.running);
+        let held = running.stop_all();
+        if held {
+            self.closing.store(true, Ordering::Relaxed);
         }
+        held
     }
 }
 
@@ -250,13 +306,29 @@ pub fn forward_captures(app: &AppHandle) {
             for event in events {
                 let state = app.state::<AppState>();
                 let update = match event {
-                    HubEvent::Ready(hotkeys) => {
-                        *lock(&state.hotkeys) = hotkeys;
-                        ShotUpdate::Ready { hotkeys }
+                    // The report of every hotkey follows this one.
+                    HubEvent::Ready(_) => continue,
+                    HubEvent::Hotkeys(states) => {
+                        let mut registered = [false; 5];
+                        for hotkey in &states {
+                            registered[hotkey.id.index()] = hotkey.registered;
+                        }
+                        *lock(&state.hotkeys) = registered;
+                        state.hotkey_reports.fetch_add(1, Ordering::Relaxed);
+                        let _ = app.emit(HOTKEYS_EVENT, state.hotkey_infos());
+                        continue;
+                    }
+                    HubEvent::VideoHotkey(id) => {
+                        recording::video_hotkey(&app, id);
+                        continue;
                     }
                     HubEvent::Capturing => ShotUpdate::Capturing,
                     HubEvent::Finished(summary) => ShotUpdate::Finished {
                         file: summary.output.as_deref().map(file_name),
+                        path: summary
+                            .output
+                            .as_deref()
+                            .map(|path| path.display().to_string()),
                         width: summary.width,
                         height: summary.height,
                         url: summary.uploaded.map(|uploaded| uploaded.url),
@@ -294,17 +366,6 @@ pub fn forward_captures(app: &AppHandle) {
         });
     // Without this thread the captures still work. Only their reports are lost.
     drop(spawned);
-}
-
-/// Clears the running recording and closes the window that waited for it.
-fn recording_ended(app: &AppHandle) {
-    let state = app.state::<AppState>();
-    *lock(&state.running) = None;
-    if state.closing.load(Ordering::Relaxed) {
-        // Give the last event time to reach the interface.
-        thread::sleep(Duration::from_millis(50));
-        app.exit(0);
-    }
 }
 
 /// Returns every screenshot choice and setting.
@@ -388,6 +449,9 @@ pub fn set_setting(
             lock(&settings.options).auto_interval = Duration::from_secs_f32(parse_seconds(value)?);
         }
         "sdrWhiteNits" => lock(&settings.options).sdr_white_nits = parse_sdr_white(value)?,
+        "countdownSeconds" => settings
+            .countdown_seconds
+            .store(parse_countdown(value)?, Ordering::Relaxed),
         "format" => {
             lock(&settings.options).format = ImageFormat::parse(value)
                 .ok_or_else(|| format!("{value} is not an image format"))?;
@@ -395,6 +459,50 @@ pub fn set_setting(
         _ => return Err(format!("{name} is not a setting")),
     }
     state.stored()
+}
+
+/// Finds a global hotkey by the name that the interface uses.
+fn hotkey_id(id: &str) -> Result<HotkeyId, String> {
+    HotkeyId::parse(id).ok_or_else(|| format!("{id} is not a hotkey"))
+}
+
+/// Refuses a chord that another enabled hotkey already uses.
+fn check_conflict(state: &AppState, id: HotkeyId, chord: Chord) -> Result<(), String> {
+    match conflict(&state.settings.hotkeys(), id, chord) {
+        Some(other) => Err(format!(
+            "{} already uses {}",
+            other.label(),
+            chord.to_text()
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Changes the keys of one global hotkey from text such as `Ctrl+Shift+F8`.
+#[tauri::command(async)]
+pub fn set_hotkey(state: State<'_, AppState>, id: &str, keys: &str) -> Result<Snapshot, String> {
+    let id = hotkey_id(id)?;
+    let chord = Chord::parse(keys)?;
+    if state.settings.hotkeys()[id.index()].enabled {
+        check_conflict(&state, id, chord)?;
+    }
+    lock(&state.settings.hotkeys)[id.index()].chord = chord;
+    state.apply_hotkeys()
+}
+
+/// Turns one global hotkey on or off.
+#[tauri::command(async)]
+pub fn set_hotkey_enabled(
+    state: State<'_, AppState>,
+    id: &str,
+    enabled: bool,
+) -> Result<Snapshot, String> {
+    let id = hotkey_id(id)?;
+    if enabled {
+        check_conflict(&state, id, state.settings.hotkeys()[id.index()].chord)?;
+    }
+    lock(&state.settings.hotkeys)[id.index()].enabled = enabled;
+    state.apply_hotkeys()
 }
 
 /// Makes a destination active and stores it. No destination turns uploads off.
@@ -493,6 +601,10 @@ pub fn edit_screenshot(
             let update = match edit_saved_image(&file, monitor, copy) {
                 Ok(Some(summary)) => ShotUpdate::Finished {
                     file: summary.output.as_deref().map(file_name),
+                    path: summary
+                        .output
+                        .as_deref()
+                        .map(|path| path.display().to_string()),
                     width: summary.width,
                     height: summary.height,
                     url: None,
@@ -559,103 +671,6 @@ pub fn monitor_preview(left: i32, top: i32, width: u32, height: u32) -> Result<R
         .map_err(|error| format!("{error:#}"))
 }
 
-/// Starts an audio or a video recording and returns the path of its file.
-///
-/// One recording runs at a time, because both modes capture the same audio
-/// device.
-#[tauri::command(async)]
-pub fn start_recording(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    mode: Mode,
-    monitor: Option<u32>,
-    fps: Option<u32>,
-) -> Result<String, String> {
-    let mut running = lock(&state.running);
-    if running.is_some() {
-        return Err("A recording runs already. Save it first.".to_owned());
-    }
-    if mode == Mode::Screenshot {
-        return Err("A screenshot is not a recording".to_owned());
-    }
-    let stamp = video_timestamp();
-    let output = if mode == Mode::Audio {
-        // An audio recording is a folder of parts and named clips.
-        create_session_directory(&default_folder(mode), &stamp)
-            .map_err(|error| format!("could not create the session folder: {error}"))?
-    } else {
-        default_folder(mode).join(format!("recording-{stamp}.{}", mode.extension()))
-    };
-    let control = Control::default();
-    *running = Some((mode, control.clone()));
-    drop(running);
-    let path = output.display().to_string();
-    if mode == Mode::Audio {
-        let (clips, clip_requests) = crossbeam_channel::bounded(8);
-        app.state::<EditState>().begin_audio(clips);
-        let saved = {
-            let app = app.clone();
-            Arc::new(move |file| audio_saved(&app, file))
-        };
-        let report: Report<SoundUpdate> = Arc::new(move |update| {
-            let ended = matches!(update, SoundUpdate::Stopped { .. });
-            if ended {
-                *lock(&app.state::<AppState>().running) = None;
-                app.state::<EditState>().end_audio();
-            }
-            let _ = app.emit(SOUND_EVENT, update);
-            if ended {
-                recording_ended(&app);
-            }
-        });
-        start_sound(output, &control, clip_requests, saved, report);
-    } else {
-        let saved = {
-            let app = app.clone();
-            Arc::new(move |summary: &_| app.state::<EditState>().remember_video(summary))
-        };
-        let report: Report<VideoUpdate> = Arc::new(move |update| {
-            let ended = matches!(update, VideoUpdate::Stopped { .. });
-            if ended {
-                *lock(&app.state::<AppState>().running) = None;
-            }
-            let _ = app.emit(VIDEO_EVENT, update);
-            if ended {
-                recording_ended(&app);
-            }
-        });
-        start_video(
-            output,
-            monitor.unwrap_or(0),
-            fps.unwrap_or(DEFAULT_FPS).clamp(1, 240),
-            &control,
-            saved,
-            report,
-        );
-    }
-    Ok(path)
-}
-
-/// Asks the running recording to save its file.
-#[tauri::command(async)]
-pub fn stop_recording(state: State<'_, AppState>) {
-    if let Some((_, control)) = &*lock(&state.running) {
-        control.stop.store(true, Ordering::Relaxed);
-    }
-}
-
-/// Pauses or resumes the running recording. Returns the new pause state.
-#[tauri::command(async)]
-pub fn set_paused(state: State<'_, AppState>, paused: bool) -> bool {
-    match &*lock(&state.running) {
-        Some((_, control)) if !stopping(control) => {
-            control.paused.store(paused, Ordering::Relaxed);
-            paused
-        }
-        _ => false,
-    }
-}
-
 /// Lists the saved files of one mode, newest first.
 #[tauri::command(async)]
 pub fn files(state: State<'_, AppState>, mode: Mode) -> Vec<FileEntry> {
@@ -673,12 +688,9 @@ pub fn files(state: State<'_, AppState>, mode: Mode) -> Vec<FileEntry> {
     list_history(&state.folder(mode))
         .into_iter()
         .take(FILE_LIMIT)
-        .map(|entry| FileEntry {
-            name: entry.name,
-            path: entry.path.display().to_string(),
-            age_seconds: now
-                .duration_since(entry.modified)
-                .map_or(0, |age| age.as_secs()),
+        .map(|entry| {
+            let size = fs::metadata(&entry.path).map_or(0, |metadata| metadata.len());
+            file_entry(entry.name, &entry.path, entry.modified, size, now)
         })
         .collect()
 }
@@ -695,31 +707,22 @@ pub fn picture(state: State<'_, AppState>, path: &str) -> Result<Response, Strin
         .map_err(|error| format!("{error:#}"))
 }
 
-/// Starts a helper program and formats a failure.
-fn launch(command: &mut Command) -> Result<(), String> {
-    command
-        .spawn()
-        .map(drop)
-        .map_err(|error| format!("could not start the file explorer: {error}"))
-}
-
 /// Shows one saved file in the file explorer.
+///
+/// The path may also be the folder of an audio session.
 #[tauri::command(async)]
 pub fn reveal(state: State<'_, AppState>, path: &str) -> Result<(), String> {
-    let file = state.listed(path)?;
-    // The explorer does not accept the long path form of a canonical path.
-    launch(
-        Command::new("explorer")
-            .arg("/select,")
-            .arg(plain_path(&file)),
-    )
+    let target = state.listed(path).or_else(|refusal| {
+        session_within(&state.folders(), Path::new(path)).map_err(|_| refusal)
+    })?;
+    shell::reveal(&target).map_err(|error| format!("{error:#}"))
 }
 
 /// Opens one saved file with the program that Windows uses for it.
 #[tauri::command(async)]
 pub fn open_file(state: State<'_, AppState>, path: &str) -> Result<(), String> {
     let file = state.listed(path)?;
-    launch(Command::new("explorer").arg(plain_path(&file)))
+    shell::open(&file).map_err(|error| format!("{error:#}"))
 }
 
 /// Opens the folder that holds the files of one mode.
@@ -728,7 +731,52 @@ pub fn open_folder(state: State<'_, AppState>, mode: Mode) -> Result<(), String>
     let folder = state.folder(mode);
     fs::create_dir_all(&folder)
         .map_err(|error| format!("could not create {}: {error}", folder.display()))?;
-    launch(Command::new("explorer").arg(folder))
+    shell::open(&folder).map_err(|error| format!("{error:#}"))
+}
+
+/// Moves one saved file to the Recycle Bin.
+#[tauri::command(async)]
+pub fn delete_file(
+    state: State<'_, AppState>,
+    edits: State<'_, EditState>,
+    path: &str,
+) -> Result<(), String> {
+    let file = state.listed(path)?;
+    shell::recycle(&file).map_err(|error| format!("{error:#}"))?;
+    edits.forget_video(&file);
+    Ok(())
+}
+
+/// Returns a small PNG picture of one saved file, at most `edge` pixels in
+/// each direction.
+///
+/// Windows gives the picture that the file explorer shows for the file.
+#[tauri::command(async)]
+pub fn thumbnail(state: State<'_, AppState>, path: &str, edge: u32) -> Result<Response, String> {
+    let file = state.listed(path)?;
+    shell::thumbnail_png(&file, edge)
+        .map(Response::new)
+        .map_err(|error| format!("{error:#}"))
+}
+
+/// Returns the JSON text that the interface stored, or `{}`.
+#[tauri::command(async)]
+pub fn ui_settings() -> String {
+    read_setting(UI_SETTING)
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| "{}".to_owned())
+}
+
+/// Stores the JSON text of the interface. The program does not read it.
+#[tauri::command(async)]
+pub fn set_ui_settings(json: &str) -> Result<(), String> {
+    if json.len() > UI_SETTING_LIMIT {
+        return Err(format!(
+            "The interface settings are larger than {} KB",
+            UI_SETTING_LIMIT / 1_024
+        ));
+    }
+    write_setting(UI_SETTING, json)
 }
 
 /// Places one saved screenshot on the clipboard.
@@ -736,15 +784,6 @@ pub fn open_folder(state: State<'_, AppState>, mode: Mode) -> Result<(), String>
 pub fn copy_picture(state: State<'_, AppState>, path: &str) -> Result<(), String> {
     let file = state.listed(path)?;
     copy_file_to_clipboard(&file).map_err(|error| format!("{error:#}"))
-}
-
-/// Removes the `\\?\` prefix that a canonical Windows path carries.
-fn plain_path(path: &Path) -> PathBuf {
-    let text = path.display().to_string();
-    match text.strip_prefix(r"\\?\") {
-        Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
-        _ => path.to_path_buf(),
-    }
 }
 
 /// Shows the window and brings it to the front.

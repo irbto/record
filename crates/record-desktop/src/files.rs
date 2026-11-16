@@ -6,7 +6,7 @@ use std::{
     time::SystemTime,
 };
 
-use crate::payload::FileEntry;
+use crate::payload::{FileEntry, unix_millis};
 
 /// Largest number of files that one list returns.
 pub const FILE_LIMIT: usize = 200;
@@ -14,7 +14,12 @@ pub const FILE_LIMIT: usize = 200;
 /// Collects the files of one folder with the given extension.
 ///
 /// With `nested`, the folders directly inside it are read too.
-fn collect(folder: &Path, extension: &str, nested: bool, files: &mut Vec<(SystemTime, PathBuf)>) {
+fn collect(
+    folder: &Path,
+    extension: &str,
+    nested: bool,
+    files: &mut Vec<(SystemTime, PathBuf, u64)>,
+) {
     let Ok(entries) = fs::read_dir(folder) else {
         return;
     };
@@ -31,7 +36,11 @@ fn collect(folder: &Path, extension: &str, nested: bool, files: &mut Vec<(System
             .extension()
             .is_some_and(|found| found.eq_ignore_ascii_case(extension))
         {
-            files.push((metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH), path));
+            files.push((
+                metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                path,
+                metadata.len(),
+            ));
         }
     }
 }
@@ -54,15 +63,32 @@ pub fn recent_files(
     files.truncate(FILE_LIMIT);
     files
         .into_iter()
-        .map(|(modified, path)| FileEntry {
-            name: path.strip_prefix(folder).map_or_else(
+        .map(|(modified, path, size)| {
+            let name = path.strip_prefix(folder).map_or_else(
                 |_| crate::payload::file_name(&path),
                 |inner| inner.display().to_string(),
-            ),
-            age_seconds: now.duration_since(modified).map_or(0, |age| age.as_secs()),
-            path: path.display().to_string(),
+            );
+            file_entry(name, &path, modified, size, now)
         })
         .collect()
+}
+
+/// Builds the list entry of one file.
+#[must_use]
+pub fn file_entry(
+    name: String,
+    path: &Path,
+    modified: SystemTime,
+    size_bytes: u64,
+    now: SystemTime,
+) -> FileEntry {
+    FileEntry {
+        name,
+        path: path.display().to_string(),
+        age_seconds: now.duration_since(modified).map_or(0, |age| age.as_secs()),
+        modified_ms: unix_millis(modified),
+        size_bytes,
+    }
 }
 
 /// Accepts a path only when the file lies in one of the folders.
@@ -86,6 +112,34 @@ pub fn within(folders: &[(PathBuf, bool)], path: &Path) -> Result<PathBuf, Strin
     } else {
         Err(refusal())
     }
+}
+
+/// Accepts a path only when it is a folder directly inside a folder with the
+/// flag.
+///
+/// An audio session is such a folder. The file explorer may show it, and no
+/// other command takes a folder.
+pub fn session_within(folders: &[(PathBuf, bool)], path: &Path) -> Result<PathBuf, String> {
+    let refusal = || format!("{} is not a folder of this program", path.display());
+    let session = path.canonicalize().map_err(|_| refusal())?;
+    let parent = session.parent().ok_or_else(refusal)?;
+    let listed = folders.iter().any(|(folder, nested)| {
+        *nested && folder.canonicalize().is_ok_and(|folder| folder == parent)
+    });
+    if listed && session.is_dir() {
+        Ok(session)
+    } else {
+        Err(refusal())
+    }
+}
+
+/// Reports whether a recording may delete its own output.
+///
+/// The output must lie directly in the folder of its mode and must not be
+/// that folder. This keeps a discard away from every other place.
+#[must_use]
+pub fn own_output(folder: &Path, output: &Path) -> bool {
+    output.parent() == Some(folder) && output.file_name().is_some()
 }
 
 #[cfg(test)]
@@ -115,11 +169,68 @@ mod tests {
         let names: Vec<&str> = files.iter().map(|file| file.name.as_str()).collect();
         assert_eq!(names, ["new.MP4", "old.mp4"]);
         assert!((5..8).contains(&files[0].age_seconds), "{files:?}");
+        assert_eq!(files[0].size_bytes, 1);
+        let modified = unix_millis(now) - files[0].modified_ms;
+        assert!((5_000..8_000).contains(&modified), "{files:?}");
         let nested = recent_files(folder.path(), "mp4", true, now);
         let inner = Path::new("session").join("part.mp4").display().to_string();
         let names: Vec<&str> = nested.iter().map(|file| file.name.as_str()).collect();
         assert_eq!(names, [inner.as_str(), "new.MP4", "old.mp4"]);
         assert!(recent_files(&folder.path().join("missing"), "mp4", true, now).is_empty());
+    }
+
+    #[test]
+    fn the_explorer_accepts_a_session_folder_and_no_other_folder() {
+        let audio = tempfile::tempdir().unwrap();
+        let video = tempfile::tempdir().unwrap();
+        let session = audio.path().join("recording-1");
+        fs::create_dir_all(session.join("deeper")).unwrap();
+        fs::write(audio.path().join("loose.mp3"), b"x").unwrap();
+        fs::create_dir(video.path().join("folder")).unwrap();
+        let folders = [
+            (audio.path().to_path_buf(), true),
+            (video.path().to_path_buf(), false),
+        ];
+        assert_eq!(
+            session_within(&folders, &session),
+            Ok(session.canonicalize().unwrap())
+        );
+        assert!(
+            session_within(
+                &folders,
+                &audio
+                    .path()
+                    .join("recording-1")
+                    .join("..")
+                    .join("recording-1")
+            )
+            .is_ok()
+        );
+        for refused in [
+            session.join("deeper"),
+            audio.path().to_path_buf(),
+            audio.path().join("loose.mp3"),
+            audio.path().join("missing"),
+            video.path().join("folder"),
+            video.path().to_path_buf(),
+        ] {
+            assert!(
+                session_within(&folders, &refused).is_err(),
+                "{}",
+                refused.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_discard_deletes_only_an_output_inside_its_folder() {
+        let folder = Path::new("/music/record");
+        assert!(own_output(folder, &folder.join("recording-1")));
+        assert!(own_output(folder, &folder.join("a.mp4")));
+        assert!(!own_output(folder, folder));
+        assert!(!own_output(folder, Path::new("/music")));
+        assert!(!own_output(folder, &folder.join("a").join("b")));
+        assert!(!own_output(folder, Path::new("/")));
     }
 
     #[test]

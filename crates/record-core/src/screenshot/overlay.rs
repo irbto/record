@@ -169,7 +169,7 @@ unsafe fn run_window(
 }
 
 /// Reads the signed pointer position from a mouse message.
-fn pointer_position(lparam: LPARAM) -> Point {
+pub(super) fn pointer_position(lparam: LPARAM) -> Point {
     let x = (lparam.0 & 0xffff) as u16 as i16;
     let y = ((lparam.0 >> 16) & 0xffff) as u16 as i16;
     Point::new(i32::from(x), i32::from(y))
@@ -268,7 +268,7 @@ impl OverlayState {
 }
 
 /// Describes a 32-bit bitmap. A negative height stores the top row first.
-fn bitmap_info(width: i32, height: i32) -> BITMAPINFO {
+pub(super) fn bitmap_info(width: i32, height: i32) -> BITMAPINFO {
     BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,

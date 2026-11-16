@@ -311,6 +311,26 @@ The window draws its own title bar in place of the Windows frame. Drag it to mov
 
 One audio or video recording runs at a time. The tab of the mode that records shows a red dot, and the other screens stay reachable.
 
+### Recording at the same time
+
+Audio and video are independent. An audio recording and a video recording can run together. The indicator at the right of the icon row shows how many recordings run. A click opens a panel with each recording, its time, and Pause, Save and stop, Discard. **Discard** stops a recording and deletes what it wrote.
+
+### Global hotkeys and key binds
+
+| Default keys | Action |
+|---|---|
+| `Ctrl+PrtSc` | Screenshot of a region |
+| `PrtSc` | Screenshot of all screens |
+| `Alt+PrtSc` | Screenshot of the active window |
+| `Ctrl+Shift+F8` | Select a region and record it. Press again to save and stop |
+| `Ctrl+Shift+F9` | Record the monitor under the pointer. Press again to save and stop |
+
+The switch beside each hotkey on Home turns it on or off. An amber bullet means that another program holds the keys. **Key binds** changes every global hotkey and every key of the window: select a row and press the new keys.
+
+### Start options
+
+`Countdown (s)` in Settings waits before a recording starts and shows the seconds on the screen. `Record audio starts at once` and `Record video starts at once` make the Home buttons start a recording directly. The file lists have a view control for list, details, and thumbnails. Thumbnails are off until you select them.
+
 ### Tray
 
 The program keeps an icon in the notification area. Windows 11 puts new icons behind the `^` arrow. Drag the icon to the taskbar to keep it visible.

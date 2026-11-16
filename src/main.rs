@@ -475,6 +475,8 @@ fn run_screenshot(cli: Cli) -> Result<()> {
             save: AtomicBool::new(saved.save),
             upload: AtomicBool::new(uploader.is_some() && (upload_requested || saved.upload)),
             uploader: Mutex::new(uploader),
+            hotkeys: Mutex::new(saved.hotkeys),
+            countdown_seconds: std::sync::atomic::AtomicU32::new(saved.countdown_seconds),
         });
         if env::var_os(TRAY_CHILD).is_some() {
             if !tray_is_running() {
