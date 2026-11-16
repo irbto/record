@@ -16,7 +16,7 @@ use std::{
     path::Path,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -31,9 +31,10 @@ use record_tui::{
     cli::{Cli, Command, ScreenshotMode},
     screenshot::{
         CaptureMode, MonitorChoice, ScreenshotConfig, default_directory,
-        hub::{HubSettings, run_tray, tray_is_running},
+        events::HubSettings,
+        hub::{run_tray, tray_is_running},
         take_screenshot, ui, unique_output_path,
-        upload::{default_destination, resolve_destination},
+        upload::{SavedTasks, default_destination, resolve_destination},
     },
     session::{OutputTarget, create_session_directory, mp3_output_path},
     tui,
@@ -453,15 +454,17 @@ fn run_screenshot(cli: Cli) -> Result<()> {
         if output.is_some() || count.is_some() {
             bail!("--output and --count need a capture mode such as region or full");
         }
+        let saved = SavedTasks::load();
         let settings = Arc::new(HubSettings {
             directory,
             monitor,
             sdr_white_nits: sdr_white,
-            copy: AtomicBool::new(!no_copy),
-            save: AtomicBool::new(true),
+            // The hub stores these choices. A flag on the command line wins.
+            copy: AtomicBool::new(!no_copy && (saved.copy || !saved.save)),
+            save: AtomicBool::new(saved.save),
             auto_interval: every.unwrap_or(Duration::from_secs(5)),
-            uploader,
-            upload: AtomicBool::new(upload_requested),
+            upload: AtomicBool::new(uploader.is_some() && (upload_requested || saved.upload)),
+            uploader: Mutex::new(uploader),
         });
         if env::var_os(TRAY_CHILD).is_some() {
             if !tray_is_running() {

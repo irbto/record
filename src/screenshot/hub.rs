@@ -49,10 +49,10 @@ use windows::{
 };
 
 use super::{
-    CaptureMode, MonitorChoice, ScreenshotConfig, ScreenshotSummary,
+    CaptureMode, ScreenshotConfig,
     canvas::{Area, Canvas, Point, rgb},
+    events::{CaptureHub, HubEvent, HubRequest, HubSettings},
     last_region, overlay, take_screenshot, unique_output_path,
-    upload::Uploader,
 };
 use crate::video::video_timestamp;
 
@@ -75,58 +75,6 @@ const CODE_DELAYED: usize = 0x10;
 const CODE_AUTO: usize = 0x20;
 /// Request code that the tray menu sends to stop the hub.
 const CODE_QUIT: usize = 0x40;
-
-/// Settings shared by the hub thread and the terminal hub.
-#[derive(Debug)]
-pub struct HubSettings {
-    /// Folder that receives the PNG files.
-    pub directory: std::path::PathBuf,
-    /// Monitor for the region and monitor modes.
-    pub monitor: MonitorChoice,
-    /// Overrides the SDR white level that Windows reports, in nits.
-    pub sdr_white_nits: Option<f32>,
-    /// Places each image on the clipboard.
-    pub copy: AtomicBool,
-    /// Writes each image to a PNG file.
-    pub save: AtomicBool,
-    /// Time between auto captures.
-    pub auto_interval: Duration,
-    /// Destination for uploads, when one is configured.
-    pub uploader: Option<Uploader>,
-    /// Uploads each image to the destination and copies the link.
-    pub upload: AtomicBool,
-}
-
-/// One request from the terminal hub to the capture thread.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HubRequest {
-    /// Capture now.
-    Capture(CaptureMode),
-    /// Capture after three seconds, so the user can arrange the desktop.
-    Delayed(CaptureMode),
-    /// Start or stop auto capture.
-    ToggleAuto,
-}
-
-/// One report from the capture thread.
-#[derive(Clone, Debug)]
-pub enum HubEvent {
-    /// The thread is running. Each flag reports one registered hotkey:
-    /// region, fullscreen, and active window.
-    Ready([bool; 3]),
-    /// A capture started.
-    Capturing,
-    /// A capture finished.
-    Finished(ScreenshotSummary),
-    /// The user closed the overlay without saving.
-    Cancelled,
-    /// A capture failed.
-    Failed(String),
-    /// Auto capture changed state.
-    Auto(bool),
-    /// The tray menu asked the hub to stop.
-    QuitRequested,
-}
 
 /// Converts a capture mode to its request code.
 const fn mode_code(mode: CaptureMode) -> usize {
@@ -189,27 +137,26 @@ impl Hub {
         })
     }
 
-    /// Returns the channel that carries reports from the capture thread.
-    #[must_use]
-    pub const fn events(&self) -> &Receiver<HubEvent> {
+    /// Posts one thread message to the capture thread.
+    fn post(&self, message: u32, code: usize) {
+        // SAFETY: Posting to a thread id has no memory preconditions. A stale
+        // id only makes the call fail.
+        let _ = unsafe { PostThreadMessageW(self.thread_id, message, WPARAM(code), LPARAM(0)) };
+    }
+}
+
+impl CaptureHub for Hub {
+    fn events(&self) -> &Receiver<HubEvent> {
         &self.events
     }
 
-    /// Sends one request. The thread drops it while a capture is running.
-    pub fn request(&self, request: HubRequest) {
+    fn request(&self, request: HubRequest) {
         let code = match request {
             HubRequest::Capture(mode) => mode_code(mode),
             HubRequest::Delayed(mode) => mode_code(mode) | CODE_DELAYED,
             HubRequest::ToggleAuto => CODE_AUTO,
         };
         self.post(WM_HUB_REQUEST, code);
-    }
-
-    /// Posts one thread message to the capture thread.
-    fn post(&self, message: u32, code: usize) {
-        // SAFETY: Posting to a thread id has no memory preconditions. A stale
-        // id only makes the call fail.
-        let _ = unsafe { PostThreadMessageW(self.thread_id, message, WPARAM(code), LPARAM(0)) };
     }
 }
 
@@ -329,8 +276,7 @@ fn message_loop(
                 delay: delayed.then_some(REQUEST_DELAY),
                 sdr_white_nits: settings.sdr_white_nits,
                 upload: settings
-                    .uploader
-                    .clone()
+                    .active_uploader()
                     .filter(|_| settings.upload.load(Ordering::Relaxed)),
             };
             report(match take_screenshot(&config) {

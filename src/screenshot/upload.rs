@@ -642,23 +642,161 @@ pub fn default_destination() -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
+/// Returns the stored Imgur API client ID.
+#[must_use]
+pub fn imgur_client_id() -> Option<String> {
+    env::var("RECORD_IMGUR_CLIENT_ID")
+        .ok()
+        .or_else(|| fs::read_to_string(settings_directory()?.join("imgur-client-id.txt")).ok())
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty())
+}
+
+/// Checks the shape of an Imgur client ID.
+fn valid_client_id(id: &str) -> bool {
+    (6..=64).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+/// Stores the Imgur API client ID for later runs.
+pub fn save_imgur_client_id(id: &str) -> Result<(), String> {
+    let id = id.trim();
+    if !valid_client_id(id) {
+        return Err("an Imgur client ID has 6 to 64 letters and digits".to_owned());
+    }
+    write_setting("imgur-client-id.txt", id)
+}
+
+/// Writes one small settings file.
+fn write_setting(file: &str, text: &str) -> Result<(), String> {
+    let directory =
+        settings_directory().ok_or_else(|| "the APPDATA folder is not available".to_owned())?;
+    fs::create_dir_all(&directory)
+        .and_then(|()| fs::write(directory.join(file), text))
+        .map_err(|error| format!("could not write {file}: {error}"))
+}
+
+/// Stores the default destination. `None` clears it.
+pub fn set_default_destination(destination: Option<&str>) -> Result<(), String> {
+    write_setting("uploader.txt", destination.unwrap_or(""))
+}
+
+/// Lists the names of the `.sxcu` files in the uploaders folder.
+#[must_use]
+pub fn list_destinations() -> Vec<String> {
+    let Some(entries) = uploaders_directory().and_then(|directory| fs::read_dir(directory).ok())
+    else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("sxcu"))
+        })
+        .filter_map(|path| Some(path.file_stem()?.to_string_lossy().into_owned()))
+        .collect();
+    names.sort_by_key(|name| name.to_lowercase());
+    names
+}
+
+/// Checks a `.sxcu` file and copies it into the uploaders folder.
+///
+/// Returns the destination name that selects the copy.
+pub fn import_sxcu(path: &Path) -> Result<String, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let name = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .filter(|stem| !stem.is_empty() && !stem.eq_ignore_ascii_case("imgur"))
+        .ok_or_else(|| "the file needs a name other than imgur".to_owned())?;
+    Uploader::from_sxcu(&text, &name)?;
+    let directory =
+        uploaders_directory().ok_or_else(|| "the APPDATA folder is not available".to_owned())?;
+    fs::create_dir_all(&directory)
+        .and_then(|()| fs::write(directory.join(format!("{name}.sxcu")), text))
+        .map_err(|error| format!("could not store the uploader: {error}"))?;
+    Ok(name)
+}
+
+/// The after-capture tasks that the hub remembers between runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SavedTasks {
+    /// Places each image on the clipboard.
+    pub copy: bool,
+    /// Writes each image to a PNG file.
+    pub save: bool,
+    /// Uploads each image to the default destination.
+    pub upload: bool,
+}
+
+impl Default for SavedTasks {
+    fn default() -> Self {
+        Self {
+            copy: true,
+            save: true,
+            upload: false,
+        }
+    }
+}
+
+impl SavedTasks {
+    /// Reads `name=true` lines. Missing or unknown lines keep the default.
+    #[must_use]
+    pub fn parse(text: &str) -> Self {
+        let mut tasks = Self::default();
+        for line in text.lines() {
+            let Some((name, value)) = line.split_once('=') else {
+                continue;
+            };
+            let Ok(value) = value.trim().parse::<bool>() else {
+                continue;
+            };
+            match name.trim() {
+                "copy" => tasks.copy = value,
+                "save" => tasks.save = value,
+                "upload" => tasks.upload = value,
+                _ => {}
+            }
+        }
+        tasks
+    }
+
+    /// Formats the tasks in the form that [`Self::parse`] reads.
+    #[must_use]
+    pub fn to_text(&self) -> String {
+        format!(
+            "copy={}\nsave={}\nupload={}\n",
+            self.copy, self.save, self.upload
+        )
+    }
+
+    /// Loads the stored tasks, or the defaults when nothing is stored.
+    #[must_use]
+    pub fn load() -> Self {
+        settings_directory()
+            .and_then(|directory| fs::read_to_string(directory.join("screenshot-tasks.txt")).ok())
+            .map_or_else(Self::default, |text| Self::parse(&text))
+    }
+
+    /// Stores the tasks for later runs. A failure only loses the memory.
+    pub fn store(&self) {
+        let _ = write_setting("screenshot-tasks.txt", &self.to_text());
+    }
+}
+
 /// Finds an upload destination by name or by `.sxcu` path.
 ///
 /// `imgur` selects the built-in Imgur destination. Any other value is a path
 /// to a `.sxcu` file or the name of a file in the uploaders folder.
 pub fn resolve_destination(destination: &str) -> Result<Uploader, String> {
     if destination.eq_ignore_ascii_case("imgur") {
-        let client_id = env::var("RECORD_IMGUR_CLIENT_ID")
-            .ok()
-            .or_else(|| fs::read_to_string(settings_directory()?.join("imgur-client-id.txt")).ok())
-            .map(|id| id.trim().to_owned())
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| {
-                "Imgur needs an API client ID. Register an application at \
-                 https://api.imgur.com/oauth2/addclient and save the client ID in \
-                 %APPDATA%\\record\\imgur-client-id.txt"
-                    .to_owned()
-            })?;
+        let client_id = imgur_client_id().ok_or_else(|| {
+            "Imgur needs an API client ID. Open record screenshot, press P, and select \
+             Imgur to enter it"
+                .to_owned()
+        })?;
         return Ok(Uploader::imgur(&client_id));
     }
     let direct = Path::new(destination);
@@ -912,6 +1050,31 @@ mod tests {
         );
         assert!(Uploader::from_sxcu(r#"{"RequestURL":"ftp://x/"}"#, "x").is_err());
         assert!(Uploader::from_sxcu("not json", "x").is_err());
+    }
+
+    #[test]
+    fn saved_tasks_round_trip_and_ignore_bad_lines() {
+        let tasks = SavedTasks {
+            copy: false,
+            save: true,
+            upload: true,
+        };
+        assert_eq!(SavedTasks::parse(&tasks.to_text()), tasks);
+        assert_eq!(
+            SavedTasks::parse("copy=maybe\nnoise\nupload = true\nother=true"),
+            SavedTasks {
+                upload: true,
+                ..SavedTasks::default()
+            }
+        );
+    }
+
+    #[test]
+    fn client_ids_are_checked_before_they_are_stored() {
+        assert!(valid_client_id("0123456789abcde"));
+        for id in ["", "short", "has space 123", "semi;colon123"] {
+            assert!(!valid_client_id(id), "{id} should fail");
+        }
     }
 
     #[test]

@@ -22,6 +22,8 @@ mod canvas;
 mod capture;
 mod color;
 mod editor;
+/// Types shared by the capture thread and the terminal hub.
+pub mod events;
 /// Saved screenshot files for the hub.
 pub mod history;
 #[cfg(windows)]
@@ -32,7 +34,6 @@ pub mod hub;
 #[cfg(windows)]
 mod overlay;
 /// The terminal hub.
-#[cfg(windows)]
 pub mod ui;
 /// Upload destinations in the ShareX custom uploader format.
 pub mod upload;

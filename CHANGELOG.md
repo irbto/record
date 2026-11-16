@@ -19,6 +19,8 @@ This file gives the important project changes. The project uses [Semantic Versio
 - `record screenshot --upload` sends each image to an upload destination and
   copies the link. It reads ShareX custom uploader (`.sxcu`) files and has a
   built-in Imgur destination.
+- The hub selects and configures upload destinations, asks for the Imgur
+  client ID, imports `.sxcu` files, and remembers the after-capture switches.
 - Screenshots of HDR monitors read the scRGB desktop surface and map it to
   sRGB with the SDR white level of the monitor, so the picture is not bright
   and washed out.

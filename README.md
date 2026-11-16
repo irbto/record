@@ -221,9 +221,9 @@ HDR displays are captured and encoded as SDR. The DXGI desktop duplication API r
 | Auto capture on or off | | `A` |
 | Screen recording in a new window | | `V` |
 
-`Tab` moves between the menu and the history. `Enter` runs the selected entry or opens the selected image. `C` copies the selected image, `O` opens the screenshots folder, and `Q` quits. The hub shows `in use` beside a hotkey that another program holds.
+`Tab` moves between the menu and the history. `Enter` runs the selected entry or opens the selected image. `C` copies the selected image, `O` opens the screenshots folder, `U` and `P` control uploads, and `Q` quits. The hub shows `in use` beside a hotkey that another program holds.
 
-Each capture writes a PNG to `Pictures\Screenshots` and places the image on the clipboard. The two after-capture entries in the menu turn each task on or off.
+Each capture writes a PNG to `Pictures\Screenshots` and places the image on the clipboard. The after-capture switches in the menu turn each task on or off, and the hub remembers them.
 
 ### Region overlay
 
@@ -293,27 +293,28 @@ record screenshot --region 0,0,1280,720 --every 10
 
 ### Upload
 
-`--upload` sends each image to an upload destination and places the link on the clipboard instead of the image. The hub entry `Upload to NAME` (key `U`) turns uploads on or off while the hub runs.
+The hub sets up uploads. Press `P`, or select `Destination`, to open the destination list:
 
-```powershell
-record screenshot --upload imgur
-record screenshot full --upload my-server
-record screenshot region --upload C:\configs\zipline.sxcu
-```
+- **Imgur** asks for an Imgur API client ID the first time and stores it.
+- **Import a .sxcu file** asks for the path of a ShareX custom uploader file and copies it into `%APPDATA%\record\uploaders`.
+- Each imported file appears in the list by its name.
+- **Off** keeps images on this computer.
 
-A destination is one of these:
+`U` turns `Upload and copy link` on or off. With uploads on, each capture goes to the destination and the clipboard holds the link instead of the image. The hub stores the destination and the three after-capture switches, and the tray process uses the same choices.
 
-| Destination | Meaning |
-|---|---|
-| `imgur` | The built-in Imgur destination. It needs an Imgur API client ID in `%APPDATA%\record\imgur-client-id.txt` or in the `RECORD_IMGUR_CLIENT_ID` variable |
-| A name | The file `NAME.sxcu` in `%APPDATA%\record\uploaders` |
-| A path | Any `.sxcu` file |
+When an upload fails, the image still goes to the file and to the clipboard, and the status line shows the reason. Each finished upload adds a line with its link and its deletion link to `%APPDATA%\record\uploads.log`.
 
 `record` reads ShareX custom uploader (`.sxcu`) files, so a configuration that a service publishes for ShareX works without changes. It supports the `MultipartFormData` and `Binary` body types and the `{json:path}`, `{response}`, `{header:name}`, and `{filename}` expressions. It rejects a file that needs another body type or expression and names the reason.
 
-Write a destination to `%APPDATA%\record\uploader.txt` to make it the default. Then `--upload` needs no value, and the hub can turn uploads on without a restart.
+Direct capture uploads only with `--upload`:
 
-When an upload fails, the image still goes to the file and to the clipboard, and the status line shows the reason. Each finished upload adds a line with its link and its deletion link to `%APPDATA%\record\uploads.log`.
+```powershell
+record screenshot full --upload
+record screenshot full --upload imgur
+record screenshot region --upload C:\configs\zipline.sxcu
+```
+
+Without a value, `--upload` uses the destination that the hub stored.
 
 ### HDR monitors
 
