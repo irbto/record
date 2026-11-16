@@ -33,6 +33,7 @@ use record_tui::{
         CaptureMode, MonitorChoice, ScreenshotConfig, default_directory,
         hub::{HubSettings, run_tray, tray_is_running},
         take_screenshot, ui, unique_output_path,
+        upload::{default_destination, resolve_destination},
     },
     session::{OutputTarget, create_session_directory, mp3_output_path},
     tui,
@@ -399,11 +400,30 @@ fn run_screenshot(cli: Cli) -> Result<()> {
         count,
         no_copy,
         sdr_white,
+        upload,
         force,
         tray,
     }) = cli.command
     else {
         unreachable!("run_screenshot is only called for the screenshot command");
+    };
+    // `--upload` turns uploads on. Without it, the hub still loads the
+    // destination from uploader.txt so the user can turn uploads on there.
+    let upload_requested = upload.is_some();
+    let destination = upload
+        .filter(|destination| !destination.is_empty())
+        .or_else(default_destination);
+    let uploader = match destination {
+        Some(destination) => match resolve_destination(&destination) {
+            Ok(uploader) => Some(uploader),
+            Err(error) if upload_requested => bail!("{error}"),
+            Err(_) => None,
+        },
+        None if upload_requested => bail!(
+            "--upload needs a destination: pass imgur, a .sxcu name, or a .sxcu path, \
+             or write the name to %APPDATA%\\record\\uploader.txt"
+        ),
+        None => None,
     };
     let monitor = if monitor.eq_ignore_ascii_case("pointer") {
         MonitorChoice::Pointer
@@ -440,6 +460,8 @@ fn run_screenshot(cli: Cli) -> Result<()> {
             copy: AtomicBool::new(!no_copy),
             save: AtomicBool::new(true),
             auto_interval: every.unwrap_or(Duration::from_secs(5)),
+            uploader,
+            upload: AtomicBool::new(upload_requested),
         });
         if env::var_os(TRAY_CHILD).is_some() {
             if !tray_is_running() {
@@ -522,6 +544,7 @@ fn run_screenshot(cli: Cli) -> Result<()> {
             copy: !no_copy,
             delay: if index == 0 { delay } else { None },
             sdr_white_nits: sdr_white,
+            upload: uploader.clone().filter(|_| upload_requested),
         };
         let Some(summary) = take_screenshot(&config)? else {
             println!("Screenshot cancelled. No file was written.");
@@ -532,7 +555,7 @@ fn run_screenshot(cli: Cli) -> Result<()> {
             None => println!("✓ Copied the screenshot to the clipboard"),
         }
         let mut detail = format!("  {}x{} · PNG", summary.width, summary.height);
-        if summary.copied && summary.output.is_some() {
+        if summary.copied && summary.output.is_some() && summary.uploaded.is_none() {
             detail.push_str(" · copied to the clipboard");
         }
         if summary.hdr {
@@ -542,6 +565,18 @@ fn run_screenshot(cli: Cli) -> Result<()> {
             ));
         }
         println!("{detail}");
+        if let Some(uploaded) = &summary.uploaded {
+            println!("  Uploaded {}", uploaded.url);
+            if summary.copied {
+                println!("  The link is on the clipboard");
+            }
+            if let Some(deletion) = &uploaded.deletion_url {
+                println!("  Delete with {deletion}");
+            }
+        }
+        if let Some(error) = &summary.upload_error {
+            eprintln!("  upload failed: {error}");
+        }
         if let Some(error) = &summary.clipboard_error {
             eprintln!("  clipboard copy failed: {error}");
         }

@@ -16,6 +16,9 @@ This file gives the important project changes. The project uses [Semantic Versio
 - Region capture freezes one monitor in an overlay with a toolbar. It draws
   rectangles, ellipses, lines, arrows, freehand strokes, text, step numbers,
   marker highlights, spotlight, pixelation, blur, and an eraser.
+- `record screenshot --upload` sends each image to an upload destination and
+  copies the link. It reads ShareX custom uploader (`.sxcu`) files and has a
+  built-in Imgur destination.
 - Screenshots of HDR monitors read the scRGB desktop surface and map it to
   sRGB with the SDR white level of the monitor, so the picture is not bright
   and washed out.

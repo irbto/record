@@ -139,3 +139,5 @@ The `hub` module owns one thread with a Windows message queue. Hotkeys, tray men
 The `ui` module draws the terminal hub with Ratatui. It sends requests to the hub thread and shows the reports that come back. The tray process runs the same message loop on its main thread and has no terminal.
 
 The saved PNG and the clipboard bitmap come from the annotated image, cropped to the selection. They never contain the toolbar or the selection dimming.
+
+The `upload` module reads ShareX custom uploader files, builds the request body, and reads the link from the response. It has no Windows dependency and no network access. The `http` module sends the request with WinHTTP, which uses the system proxy settings and certificate store.

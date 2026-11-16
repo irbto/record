@@ -212,6 +212,12 @@ pub enum Command {
         #[arg(long, value_parser = parse_sdr_white, value_name = "NITS")]
         sdr_white: Option<f32>,
 
+        /// Upload each image and copy its link. DESTINATION is imgur, the
+        /// name of a .sxcu file in %APPDATA%\record\uploaders, or a
+        /// .sxcu path. Without a value, uploader.txt names the destination.
+        #[arg(long, value_name = "DESTINATION", num_args = 0..=1, default_missing_value = "")]
+        upload: Option<String>,
+
         /// Replace an existing output file.
         #[arg(short, long)]
         force: bool,
@@ -335,9 +341,12 @@ mod tests {
             "--no-copy",
             "--sdr-white",
             "200",
+            "--upload",
+            "imgur",
         ])
         .unwrap();
         let Some(Command::Screenshot {
+            upload,
             mode,
             dir,
             monitor,
@@ -360,6 +369,21 @@ mod tests {
         assert_eq!(count, Some(4));
         assert!(no_copy && !tray);
         assert_eq!(sdr_white, Some(200.0));
+        assert_eq!(upload.as_deref(), Some("imgur"));
+    }
+
+    #[test]
+    fn upload_accepts_a_missing_destination() {
+        let parsed = Cli::try_parse_from(["record", "screenshot", "full", "--upload"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Screenshot { upload: Some(destination), .. }) if destination.is_empty()
+        ));
+        let parsed = Cli::try_parse_from(["record", "screenshot", "full"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Screenshot { upload: None, .. })
+        ));
     }
 
     #[test]

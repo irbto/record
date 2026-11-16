@@ -405,6 +405,39 @@ unsafe fn render_text(text: &str, pixel_height: u32) -> Option<Mask> {
     }
 }
 
+/// Places text on the clipboard.
+pub(crate) fn copy_text_to_clipboard(text: &str) -> Result<()> {
+    /// Standard clipboard format number of UTF-16 text.
+    const CF_UNICODETEXT: u32 = 13;
+    let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
+    // SAFETY: The block holds every UTF-16 unit including the terminator.
+    // The clipboard owns the block only after SetClipboardData succeeds, and
+    // the block is freed here in every other case.
+    unsafe {
+        let block = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2)
+            .context("could not allocate clipboard data")?;
+        let target = GlobalLock(block).cast::<u16>();
+        if target.is_null() {
+            let _ = GlobalFree(Some(block));
+            bail!("could not lock clipboard data");
+        }
+        ptr::copy_nonoverlapping(wide.as_ptr(), target, wide.len());
+        let _ = GlobalUnlock(block);
+        if let Err(error) = OpenClipboard(None) {
+            let _ = GlobalFree(Some(block));
+            return Err(anyhow!(error).context("could not open the clipboard"));
+        }
+        let _ = EmptyClipboard();
+        let stored = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(block.0)));
+        let _ = CloseClipboard();
+        if let Err(error) = stored {
+            let _ = GlobalFree(Some(block));
+            return Err(anyhow!(error).context("could not store the link on the clipboard"));
+        }
+    }
+    Ok(())
+}
+
 /// Places an image on the clipboard as a device-independent bitmap.
 pub(crate) fn copy_to_clipboard(image: &Canvas) -> Result<()> {
     let (width, height) = (image.width() as usize, image.height() as usize);

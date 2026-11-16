@@ -52,6 +52,7 @@ use super::{
     CaptureMode, MonitorChoice, ScreenshotConfig, ScreenshotSummary,
     canvas::{Area, Canvas, Point, rgb},
     last_region, overlay, take_screenshot, unique_output_path,
+    upload::Uploader,
 };
 use crate::video::video_timestamp;
 
@@ -90,6 +91,10 @@ pub struct HubSettings {
     pub save: AtomicBool,
     /// Time between auto captures.
     pub auto_interval: Duration,
+    /// Destination for uploads, when one is configured.
+    pub uploader: Option<Uploader>,
+    /// Uploads each image to the destination and copies the link.
+    pub upload: AtomicBool,
 }
 
 /// One request from the terminal hub to the capture thread.
@@ -323,6 +328,10 @@ fn message_loop(
                 copy: settings.copy.load(Ordering::Relaxed),
                 delay: delayed.then_some(REQUEST_DELAY),
                 sdr_white_nits: settings.sdr_white_nits,
+                upload: settings
+                    .uploader
+                    .clone()
+                    .filter(|_| settings.upload.load(Ordering::Relaxed)),
             };
             report(match take_screenshot(&config) {
                 Ok(Some(summary)) => HubEvent::Finished(summary),

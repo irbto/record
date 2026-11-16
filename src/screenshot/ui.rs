@@ -48,6 +48,7 @@ enum MenuItem {
     Recording,
     CopyToggle,
     SaveToggle,
+    UploadToggle,
     Folder,
     OpenImage,
     CopyImage,
@@ -63,7 +64,7 @@ enum Row {
 }
 
 /// The menu in display order.
-const ROWS: [Row; 21] = [
+const ROWS: [Row; 22] = [
     Row::Heading("Capture"),
     Row::Item(MenuItem::Region),
     Row::Item(MenuItem::Fullscreen),
@@ -77,6 +78,7 @@ const ROWS: [Row; 21] = [
     Row::Heading("After capture tasks"),
     Row::Item(MenuItem::CopyToggle),
     Row::Item(MenuItem::SaveToggle),
+    Row::Item(MenuItem::UploadToggle),
     Row::Gap,
     Row::Heading("Tools"),
     Row::Item(MenuItem::Folder),
@@ -182,8 +184,17 @@ impl App {
                     |path| format!("Saved {}", file_name(path)),
                 );
                 let mut status = format!("{target} · {}x{}", summary.width, summary.height);
-                if summary.copied && summary.output.is_some() {
+                if let Some(uploaded) = &summary.uploaded {
+                    status = format!("Uploaded {}", uploaded.url);
+                    if summary.copied {
+                        status.push_str(" · link copied");
+                    }
+                } else if summary.copied && summary.output.is_some() {
                     status.push_str(" · copied");
+                }
+                let failed = summary.upload_error.is_some();
+                if let Some(error) = &summary.upload_error {
+                    status.push_str(&format!(" · upload failed: {error}"));
                 }
                 if summary.hdr {
                     status.push_str(&format!(" · HDR at {:.0} nits", summary.sdr_white_nits));
@@ -191,7 +202,7 @@ impl App {
                 if let Some(error) = summary.clipboard_error {
                     status.push_str(&format!(" · clipboard failed: {error}"));
                 }
-                self.report(status, false);
+                self.report(status, failed);
                 self.history = list_history(&self.settings.directory);
                 self.selected = 0;
             }
@@ -247,6 +258,7 @@ impl App {
                     'v' => MenuItem::Recording,
                     'c' => MenuItem::CopyImage,
                     'o' => MenuItem::Folder,
+                    'u' => MenuItem::UploadToggle,
                     _ => return,
                 };
                 self.activate(item);
@@ -316,6 +328,17 @@ impl App {
         match item {
             MenuItem::CopyToggle => self.toggle(true),
             MenuItem::SaveToggle => self.toggle(false),
+            MenuItem::UploadToggle => {
+                if self.settings.uploader.is_some() {
+                    self.settings.upload.fetch_xor(true, Ordering::Relaxed);
+                } else {
+                    self.report(
+                        "No upload destination. Start with --upload imgur or --upload NAME."
+                            .to_owned(),
+                        true,
+                    );
+                }
+            }
             MenuItem::Folder => {
                 let _ = std::fs::create_dir_all(&self.settings.directory);
                 self.launch(Command::new("explorer").arg(&self.settings.directory));
@@ -401,6 +424,17 @@ impl App {
                     check(self.settings.save.load(Ordering::Relaxed))
                 ),
                 String::new(),
+            ),
+            MenuItem::UploadToggle => (
+                match &self.settings.uploader {
+                    Some(uploader) => format!(
+                        "{} Upload to {}",
+                        check(self.settings.upload.load(Ordering::Relaxed)),
+                        uploader.name
+                    ),
+                    None => "[ ] Upload (no destination)".to_owned(),
+                },
+                "U".to_owned(),
             ),
             MenuItem::Folder => ("Screenshots folder...".to_owned(), "O".to_owned()),
             MenuItem::OpenImage => ("Open selected image".to_owned(), "Enter".to_owned()),

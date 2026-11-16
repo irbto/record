@@ -278,6 +278,7 @@ Options:
       --count <COUNT>      Auto capture: stop after this many captures
       --no-copy            Do not place the image on the clipboard
       --sdr-white <NITS>   Override the SDR white level of an HDR monitor
+      --upload [<DEST>]    Upload each image and copy its link
   -f, --force              Replace an existing output file
       --tray               Run in the notification area
 ```
@@ -289,6 +290,30 @@ record screenshot window -d 2
 # Capture a fixed rectangle every 10 seconds until Ctrl+C.
 record screenshot --region 0,0,1280,720 --every 10
 ```
+
+### Upload
+
+`--upload` sends each image to an upload destination and places the link on the clipboard instead of the image. The hub entry `Upload to NAME` (key `U`) turns uploads on or off while the hub runs.
+
+```powershell
+record screenshot --upload imgur
+record screenshot full --upload my-server
+record screenshot region --upload C:\configs\zipline.sxcu
+```
+
+A destination is one of these:
+
+| Destination | Meaning |
+|---|---|
+| `imgur` | The built-in Imgur destination. It needs an Imgur API client ID in `%APPDATA%\record\imgur-client-id.txt` or in the `RECORD_IMGUR_CLIENT_ID` variable |
+| A name | The file `NAME.sxcu` in `%APPDATA%\record\uploaders` |
+| A path | Any `.sxcu` file |
+
+`record` reads ShareX custom uploader (`.sxcu`) files, so a configuration that a service publishes for ShareX works without changes. It supports the `MultipartFormData` and `Binary` body types and the `{json:path}`, `{response}`, `{header:name}`, and `{filename}` expressions. It rejects a file that needs another body type or expression and names the reason.
+
+Write a destination to `%APPDATA%\record\uploader.txt` to make it the default. Then `--upload` needs no value, and the hub can turn uploads on without a restart.
+
+When an upload fails, the image still goes to the file and to the clipboard, and the status line shows the reason. Each finished upload adds a line with its link and its deletion link to `%APPDATA%\record\uploads.log`.
 
 ### HDR monitors
 

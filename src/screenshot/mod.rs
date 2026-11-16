@@ -24,6 +24,8 @@ mod color;
 mod editor;
 /// Saved screenshot files for the hub.
 pub mod history;
+#[cfg(windows)]
+mod http;
 /// The capture thread with global hotkeys.
 #[cfg(windows)]
 pub mod hub;
@@ -32,6 +34,8 @@ mod overlay;
 /// The terminal hub.
 #[cfg(windows)]
 pub mod ui;
+/// Upload destinations in the ShareX custom uploader format.
+pub mod upload;
 
 /// Selects the monitor for region and monitor captures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,6 +126,8 @@ pub struct ScreenshotConfig {
     pub delay: Option<Duration>,
     /// Overrides the SDR white level that Windows reports, in nits.
     pub sdr_white_nits: Option<f32>,
+    /// Uploads the image to this destination and copies the link.
+    pub upload: Option<upload::Uploader>,
 }
 
 /// Describes one finished screenshot.
@@ -137,6 +143,10 @@ pub struct ScreenshotSummary {
     pub copied: bool,
     /// The reason the clipboard copy failed, when it did.
     pub clipboard_error: Option<String>,
+    /// The links of the uploaded image. The clipboard then holds the link.
+    pub uploaded: Option<upload::UploadResult>,
+    /// The reason the upload failed, when it did.
+    pub upload_error: Option<String>,
     /// Reports whether a captured monitor was in HDR mode.
     pub hdr: bool,
     /// The SDR white level used for the HDR conversion, in nits.
@@ -222,6 +232,7 @@ pub fn take_screenshot(config: &ScreenshotConfig) -> anyhow::Result<Option<Scree
         ))
     };
     let mut write_file = config.save;
+    let mut copy_only_is_off = true;
     let (image, hdr, sdr_white_nits) = match config.mode {
         CaptureMode::Region => {
             let captured = capture::capture_monitor(config.monitor, white)?;
@@ -230,7 +241,10 @@ pub fn take_screenshot(config: &ScreenshotConfig) -> anyhow::Result<Option<Scree
             let (outcome, image, selection) = overlay::edit(captured)?;
             match outcome {
                 Outcome::Save => {}
-                Outcome::CopyOnly => write_file = false,
+                Outcome::CopyOnly => {
+                    write_file = false;
+                    copy_only_is_off = false;
+                }
                 Outcome::Cancel | Outcome::Continue => return Ok(None),
             }
             if let Some(selection) = selection {
@@ -268,6 +282,21 @@ pub fn take_screenshot(config: &ScreenshotConfig) -> anyhow::Result<Option<Scree
             crop_desktop(region)?
         }
     };
+    // Encode once. The file and the upload use the same bytes.
+    let upload_wanted = config.upload.is_some() && copy_only_is_off;
+    let mut png = Vec::new();
+    if write_file || upload_wanted {
+        use image::ImageEncoder;
+
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(
+                &image.to_rgb_bytes(),
+                image.width(),
+                image.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .context("could not encode the PNG image")?;
+    }
     let output = if write_file {
         if let Some(parent) = config
             .output
@@ -277,21 +306,35 @@ pub fn take_screenshot(config: &ScreenshotConfig) -> anyhow::Result<Option<Scree
             fs::create_dir_all(parent)
                 .with_context(|| format!("could not create {}", parent.display()))?;
         }
-        image::save_buffer_with_format(
-            &config.output,
-            &image.to_rgb_bytes(),
-            image.width(),
-            image.height(),
-            image::ExtendedColorType::Rgb8,
-            image::ImageFormat::Png,
-        )
-        .with_context(|| format!("could not write {}", config.output.display()))?;
+        fs::write(&config.output, &png)
+            .with_context(|| format!("could not write {}", config.output.display()))?;
         Some(config.output.clone())
     } else {
         None
     };
-    // An image that reaches no file must at least reach the clipboard.
-    let clipboard = (config.copy || !write_file).then(|| overlay::copy_to_clipboard(&image));
+    let (mut uploaded, mut upload_error) = (None, None);
+    if let Some(uploader) = config.upload.as_ref().filter(|_| upload_wanted) {
+        let file_name = config.output.file_name().map_or_else(
+            || "screenshot.png".to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let sent = http::send(&uploader.request(&file_name, &png))
+            .map_err(|error| format!("{error:#}"))
+            .and_then(|response| uploader.result(&response, &file_name));
+        match sent {
+            Ok(result) => {
+                upload::log_upload(&file_name, &result);
+                uploaded = Some(result);
+            }
+            Err(error) => upload_error = Some(error),
+        }
+    }
+    // After an upload the clipboard holds the link. Otherwise it holds the
+    // image, and an image that reaches no file must at least reach it.
+    let clipboard = match &uploaded {
+        Some(result) => Some(overlay::copy_text_to_clipboard(&result.url)),
+        None => (config.copy || !write_file).then(|| overlay::copy_to_clipboard(&image)),
+    };
     Ok(Some(ScreenshotSummary {
         output,
         width: image.width(),
@@ -300,6 +343,8 @@ pub fn take_screenshot(config: &ScreenshotConfig) -> anyhow::Result<Option<Scree
         clipboard_error: clipboard
             .and_then(Result::err)
             .map(|error| format!("{error:#}")),
+        uploaded,
+        upload_error,
         hdr,
         sdr_white_nits,
     }))
