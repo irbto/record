@@ -109,10 +109,10 @@ function note(parent: HTMLElement, text: string): void {
 
 // ---- Routes. ----
 
-const hashes: Record<string, Route> = { "": "home", "/": "home", "/audio": "audio", "/video": "video", "/screenshot": "screenshot" };
+const hashes: Record<string, Route> = { audio: "audio", video: "video", screenshot: "screenshot" };
 
 function readRoute(): Route {
-  return hashes[location.hash.replace(/^#/, "")] ?? "home";
+  return hashes[location.hash.replace(/^#\/?/, "")] ?? "home";
 }
 
 function go(route: Route): void {
