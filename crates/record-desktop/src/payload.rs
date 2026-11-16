@@ -113,7 +113,7 @@ pub struct VideoInfo {
 }
 
 /// The edit that the interface asks for. Times are in seconds.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoEdit {
     /// First frame to keep.
@@ -136,6 +136,13 @@ pub struct VideoEdit {
     pub crop_top: u32,
     /// Pixels to remove at the bottom edge.
     pub crop_bottom: u32,
+    /// Keyframes of the picture level: seconds from the start of the kept
+    /// range and a level from 0 to 1.
+    #[serde(default)]
+    pub opacity: Vec<[f64; 2]>,
+    /// Keyframes of the audio level, in the same form.
+    #[serde(default)]
+    pub volume: Vec<[f64; 2]>,
 }
 
 /// One report from a running video export.

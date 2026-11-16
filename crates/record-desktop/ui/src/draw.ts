@@ -313,6 +313,7 @@ export function lanes(
   end: number,
   play: number | null,
   ramps: { from: number; to: number; color: string; top: boolean; held: boolean }[] = [],
+  curves: { points: [number, number][]; color: string; top: boolean }[] = [],
 ): void {
   const [g, width, height] = fit(canvas);
   const band = height / Math.max(1, waves.length);
@@ -362,10 +363,43 @@ export function lanes(
     if (ramp.held) g.fillRect(ramp.to * width - 4, high - (ramp.top ? 0 : 8), 8, 8);
     g.globalAlpha = 1;
   }
+  // A keyframed level is a line through its keyframes, drawn as diamonds.
+  for (const curve of curves) {
+    if (!curve.points.length) continue;
+    const [low, high] = curve.top ? [height / 2 - 4, 6] : [height / 2 + 4, height - 6];
+    const y = (level: number) => low + (high - low) * level;
+    const first = curve.points[0]!;
+    const last = curve.points[curve.points.length - 1]!;
+    g.strokeStyle = curve.color;
+    g.fillStyle = curve.color;
+    g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(0, y(first[1]));
+    for (const [x, level] of curve.points) g.lineTo(x * width, y(level));
+    g.lineTo(width, y(last[1]));
+    g.stroke();
+    for (const [x, level] of curve.points) {
+      g.beginPath();
+      g.moveTo(x * width, y(level) - 5);
+      g.lineTo(x * width + 5, y(level));
+      g.lineTo(x * width, y(level) + 5);
+      g.lineTo(x * width - 5, y(level));
+      g.fill();
+    }
+  }
   if (play !== null) {
     g.fillStyle = token("--red");
     g.fillRect(Math.round(play * width), 0, 1, height);
   }
+}
+
+/** Darkens the picture drawn by `contain`. A level of 1 changes nothing. */
+export function dim(canvas: HTMLCanvasElement, pictureWidth: number, pictureHeight: number, level: number): void {
+  if (!pictureWidth || !pictureHeight || level >= 1) return;
+  const { x, y, scale } = pictureBox(canvas, pictureWidth, pictureHeight);
+  const g = canvas.getContext("2d")!;
+  g.fillStyle = `rgb(0 0 0 / ${1 - Math.max(0, level)})`;
+  g.fillRect(x, y, pictureWidth * scale, pictureHeight * scale);
 }
 
 /** Returns where `contain` draws a picture of this size on a canvas. */

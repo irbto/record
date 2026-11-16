@@ -28,8 +28,8 @@ use record_core::{
     session::clip_stem,
     video::{
         VideoSummary,
-        clip::{TrimProgress, trim_video_with_settings_and_progress},
-        edit::VideoEditSettings,
+        clip::{TrimProgress, trim_video_with_curves_and_progress},
+        edit::{VideoEditCurves, VideoEditSettings},
         preview::{PreviewCommand, PreviewEvent, spawn_preview_worker},
         waveform::{WaveformLoad, load_mp4_waveform},
     },
@@ -491,6 +491,17 @@ pub fn export_video(
         crop_top: edit.crop_top,
         crop_bottom: edit.crop_bottom,
     };
+    let keyframes = |points: &[[f64; 2]]| {
+        points
+            .iter()
+            .filter(|point| point[0].is_finite() && point[1].is_finite())
+            .map(|point| (Duration::from_secs_f64(point[0].max(0.0)), point[1]))
+            .collect()
+    };
+    let curves = VideoEditCurves {
+        video_gain: keyframes(&edit.opacity),
+        audio_gain: keyframes(&edit.volume),
+    };
     thread::Builder::new()
         .name("video-export".to_owned())
         .spawn(move || {
@@ -510,12 +521,13 @@ pub fn export_video(
                 };
                 let _ = app.emit(EDIT_EVENT, update);
             };
-            let result = trim_video_with_settings_and_progress(
+            let result = trim_video_with_curves_and_progress(
                 &summary.output,
                 &summary,
                 edit.start_frame,
                 edit.end_frame,
                 &settings,
+                &curves,
                 progress,
             );
             let (saved, error) = match result {

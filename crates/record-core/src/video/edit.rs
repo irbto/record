@@ -103,12 +103,39 @@ pub(super) struct ValidatedVideoEditSettings {
     pub(super) output_height: u32,
 }
 
+/// Levels that change over the edited range, set by keyframes.
+///
+/// Each keyframe holds a time from the start of the edited range and a level
+/// from 0 to 1. The level moves in a straight line between two keyframes and
+/// stays at the nearest keyframe outside them. An empty list changes nothing.
+/// The levels multiply with the fades of [`VideoEditSettings`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VideoEditCurves {
+    /// Brightness of the picture, where 0 is black.
+    pub video_gain: Vec<(Duration, f64)>,
+    /// Loudness of the audio, where 0 is silence.
+    pub audio_gain: Vec<(Duration, f64)>,
+}
+
+impl VideoEditCurves {
+    /// Reports whether export would leave every level unchanged.
+    #[must_use]
+    pub fn is_identity(&self) -> bool {
+        self.video_gain
+            .iter()
+            .chain(&self.audio_gain)
+            .all(|(_, level)| *level >= 1.0)
+    }
+}
+
 /// Precomputes one independent pair of linear fades on a fixed-rate timeline.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct FadeEnvelope {
     total_frames: u64,
     fade_in_frames: u64,
     fade_out_frames: u64,
+    /// Keyframes as frame positions with levels, in time order.
+    curve: Vec<(u64, f64)>,
 }
 
 impl FadeEnvelope {
@@ -117,7 +144,35 @@ impl FadeEnvelope {
             total_frames,
             fade_in_frames: duration_frames(fade_in, rate).min(total_frames),
             fade_out_frames: duration_frames(fade_out, rate).min(total_frames),
+            curve: Vec::new(),
         }
+    }
+
+    /// Adds keyframed levels that multiply with the fades.
+    pub(super) fn with_curve(mut self, keyframes: &[(Duration, f64)], rate: u32) -> Self {
+        self.curve = keyframes
+            .iter()
+            .map(|(time, level)| {
+                let frame = (time.as_secs_f64() * f64::from(rate)).round() as u64;
+                (frame, level.clamp(0.0, 1.0))
+            })
+            .collect();
+        self.curve.sort_by_key(|(frame, _)| *frame);
+        self
+    }
+
+    /// Returns the keyframed level at one frame.
+    fn curve_gain(&self, frame: u64) -> f64 {
+        let Some(after) = self.curve.iter().position(|(at, _)| *at > frame) else {
+            return self.curve.last().map_or(1.0, |(_, level)| *level);
+        };
+        let (next_frame, next) = self.curve[after];
+        let Some((previous_frame, previous)) = after.checked_sub(1).map(|index| self.curve[index])
+        else {
+            return next;
+        };
+        let position = (frame - previous_frame) as f64 / (next_frame - previous_frame) as f64;
+        previous + (next - previous) * position
     }
 
     /// Returns the lower of the independent fade-in and fade-out gains.
@@ -136,11 +191,13 @@ impl FadeEnvelope {
         } else {
             remaining.min(self.fade_out_frames) as f64 / self.fade_out_frames as f64
         };
-        fade_in.min(fade_out)
+        fade_in.min(fade_out) * self.curve_gain(frame)
     }
 
     fn is_identity(&self) -> bool {
-        self.fade_in_frames == 0 && self.fade_out_frames == 0
+        self.fade_in_frames == 0
+            && self.fade_out_frames == 0
+            && self.curve.iter().all(|(_, level)| *level >= 1.0)
     }
 }
 
@@ -268,6 +325,39 @@ fn nv12_byte_len(width: u32, height: u32) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyframes_set_the_level_between_and_outside_them() {
+        let seconds = Duration::from_secs;
+        let envelope = FadeEnvelope::new(100, 10, Duration::ZERO, Duration::ZERO).with_curve(
+            &[(seconds(6), 0.0), (seconds(2), 1.0), (seconds(4), 0.5)],
+            10,
+        );
+        assert!(!envelope.is_identity());
+        // Before the first keyframe and after the last one the level holds.
+        assert_eq!(envelope.gain(0), 1.0);
+        assert_eq!(envelope.gain(99), 0.0);
+        assert_eq!(envelope.gain(20), 1.0);
+        assert!((envelope.gain(30) - 0.75).abs() < 1e-9);
+        assert_eq!(envelope.gain(40), 0.5);
+        assert!((envelope.gain(50) - 0.25).abs() < 1e-9);
+        // A level above 1 counts as 1, and a fade multiplies with the curve.
+        let faded = FadeEnvelope::new(100, 10, seconds(1), Duration::ZERO)
+            .with_curve(&[(Duration::ZERO, 0.5), (seconds(9), 7.0)], 10);
+        assert!((faded.gain(5) - 0.5 * (0.5 + 0.5 * 5.0 / 90.0)).abs() < 1e-9);
+        assert_eq!(faded.gain(95), 1.0);
+        let plain = FadeEnvelope::new(100, 10, Duration::ZERO, Duration::ZERO)
+            .with_curve(&[(seconds(1), 1.0)], 10);
+        assert!(plain.is_identity());
+        assert!(VideoEditCurves::default().is_identity());
+        assert!(
+            !VideoEditCurves {
+                video_gain: vec![(Duration::ZERO, 0.4)],
+                audio_gain: Vec::new(),
+            }
+            .is_identity()
+        );
+    }
 
     #[test]
     fn default_settings_are_identity_edits() {

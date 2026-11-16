@@ -17,6 +17,9 @@ This file gives the important project changes. The project uses [Semantic Versio
 - `record-desktop` cuts named clips in an audio recording and trims them,
   opens a finished video in an editor for range, fades, and crop, and opens
   a saved screenshot in the annotation overlay again.
+- The video editor of `record-desktop` has mouse tools for range, fades,
+  and crop, and keyframes for opacity and volume. The trim engine takes
+  keyframed picture and audio levels.
 - `scripts/build-install.ps1` builds and installs both programs. It closes
   the running copies first and starts them again.
 - Screenshots save as PNG, JPEG, WebP, BMP, GIF, or TIFF. The settings and

@@ -158,7 +158,52 @@ export async function openClipEditor(save: Save): Promise<void> {
 // ---- Video. ----
 
 type Tool = "range" | "videoFade" | "audioFade" | "crop";
-const tools: [Tool, string][] = [["range", "Range"], ["videoFade", "Video fade"], ["audioFade", "Audio fade"], ["crop", "Crop"]];
+const icon = (path: string) => `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="${path}"/></svg>`;
+/** Each tool with its name, its key, and its picture. */
+const tools: { tool: Tool; label: string; key: string; icon: string }[] = [
+  { tool: "range", label: "Range", key: "T", icon: icon("M5 3H3v10h2M11 3h2v10h-2M6 8h4") },
+  { tool: "videoFade", label: "Video fade", key: "V", icon: icon("M2 3h12v10H2zM3 12l10-8") },
+  { tool: "audioFade", label: "Audio fade", key: "A", icon: icon("M2 9v-1M5 10V7M8 11V6M11 12V5M14 13V4") },
+  { tool: "crop", label: "Crop", key: "C", icon: icon("M4 1v11h11M1 4h11v11") },
+];
+
+/** A level that is constant, or that follows keyframes. Values run from 0 to 1. */
+interface Level {
+  base: number;
+  keys: { frame: number; value: number }[];
+}
+type LevelName = "opacity" | "volume";
+const levelNames: [LevelName, string][] = [["opacity", "Opacity (%)"], ["volume", "Volume (%)"]];
+
+function levelAt(level: Level, frame: number): number {
+  const { keys } = level;
+  if (!keys.length) return level.base;
+  const after = keys.findIndex((key) => key.frame > frame);
+  if (after < 0) return keys[keys.length - 1]!.value;
+  if (after === 0) return keys[0]!.value;
+  const [previous, next] = [keys[after - 1]!, keys[after]!];
+  return previous.value + ((next.value - previous.value) * (frame - previous.frame)) / (next.frame - previous.frame);
+}
+
+/** Sets the level at one frame: a keyframe when the level has keyframes. */
+function setLevel(level: Level, frame: number, value: number, force = false): void {
+  if (!level.keys.length && !force) {
+    level.base = value;
+    return;
+  }
+  const existing = level.keys.find((key) => key.frame === frame);
+  if (existing) existing.value = value;
+  else level.keys.push({ frame, value });
+  level.keys.sort((first, second) => first.frame - second.frame);
+}
+
+/** The keyframes of the kept range, in seconds from its start. */
+function exported(level: Level, start: number, end: number, fps: number): [number, number][] {
+  if (!level.keys.length) return level.base < 1 ? [[0, level.base]] : [];
+  const inside = level.keys.filter((key) => key.frame > start && key.frame < end - 1);
+  const frames = [start, ...inside.map((key) => key.frame), end - 1];
+  return frames.map((frame) => [(frame - start) / fps, levelAt(level, frame)]);
+}
 
 interface VideoState {
   info: VideoInfo;
@@ -169,6 +214,7 @@ interface VideoState {
   playhead: number;
   fades: { videoIn: number; videoOut: number; audioIn: number; audioOut: number };
   crop: { left: number; right: number; top: number; bottom: number };
+  levels: Record<LevelName, Level>;
   bins: [number, number][];
   picture: ImageBitmap | null;
   wanted: number | null;
@@ -192,6 +238,7 @@ function fresh(info: VideoInfo): VideoState {
     playhead: 0,
     fades: { videoIn: 0, videoOut: 0, audioIn: 0, audioOut: 0 },
     crop: { left: 0, right: 0, top: 0, bottom: 0 },
+    levels: { opacity: { base: 1, keys: [] }, volume: { base: 1, keys: [] } },
     bins: [],
     picture: null,
     wanted: 0,
@@ -251,7 +298,13 @@ function paintVideo(): void {
   const frames = Math.max(1, state.info.frames);
   const [first, last] = [state.start / frames, state.end / frames];
   const fps = state.info.fps;
-  const { fades } = state;
+  const { fades, levels } = state;
+  // The picture shows the fade and the opacity at the playhead.
+  const since = (state.playhead - state.start) / fps;
+  const until = (state.end - 1 - state.playhead) / fps;
+  const faded = Math.min(fades.videoIn ? since / fades.videoIn : 1, fades.videoOut ? until / fades.videoOut : 1, 1);
+  draw.dim(canvas, state.picture?.width ?? 0, state.picture?.height ?? 0, Math.max(0, faded) * levelAt(levels.opacity, state.playhead));
+  const points = (level: Level): [number, number][] => level.keys.map((key) => [key.frame / frames, key.value]);
   const ramp = (seconds: number, rising: boolean, color: string, top: boolean, tool: Tool) => ({
     from: rising ? first : last,
     to: rising ? first + (seconds * fps) / frames : last - (seconds * fps) / frames,
@@ -264,6 +317,9 @@ function paintVideo(): void {
     ramp(fades.videoOut, false, draw.token("--green"), true, "videoFade"),
     ramp(fades.audioIn, true, draw.token("--amber"), false, "audioFade"),
     ramp(fades.audioOut, false, draw.token("--amber"), false, "audioFade"),
+  ], [
+    { points: points(levels.opacity), color: draw.token("--green"), top: true },
+    { points: points(levels.volume), color: draw.token("--amber"), top: false },
   ]);
   syncFields();
   $("editor-range").textContent = `Range · ${stamp(state.start / fps)} to ${stamp(state.end / fps)} · ${stamp((state.end - state.start) / fps)}`;
@@ -294,6 +350,15 @@ function syncFields(): void {
     const text = String(Number(value.toFixed(2)));
     if (input && document.activeElement !== input && input.value !== text) input.value = text;
   }
+  for (const [name] of levelNames) {
+    const level = video.levels[name];
+    const input = document.getElementById(`edit-${name}`) as HTMLInputElement | null;
+    const text = String(Math.round(levelAt(level, video.playhead) * 100));
+    if (input && document.activeElement !== input && input.value !== text) input.value = text;
+    const here = level.keys.some((key) => key.frame === video!.playhead);
+    document.getElementById(`key-${name}`)?.classList.toggle("on", here);
+    document.getElementById(`key-${name}`)?.classList.toggle("some", level.keys.length > 0);
+  }
 }
 
 function renderVideoEditor(): void {
@@ -307,11 +372,25 @@ function renderVideoEditor(): void {
     element.addEventListener("click", action);
     return element;
   };
-  const tool = h("select", { id: "editor-tool", className: "tool", disabled: busy, title: "Tool" }, ...tools.map(([value, label]) => h("option", { value, textContent: label, selected: value === state.tool })));
-  tool.addEventListener("change", () => {
-    state.tool = tool.value as Tool;
-    paintVideo();
-  });
+  // The tool list: a button with the picture of the tool, and one row for each tool.
+  const current = tools.find((one) => one.tool === state.tool) ?? tools[0]!;
+  const face = (one: (typeof tools)[number], key: boolean) => {
+    const picture = h("span", { className: "tool-icon" });
+    picture.innerHTML = one.icon;
+    return [picture, h("span", { textContent: one.label }), h("kbd", { textContent: key ? one.key : "▾" })];
+  };
+  const toolButton = h("button", { type: "button", id: "editor-tool", disabled: busy, title: "Tool" }, ...face(current, false));
+  const toolList = h("div", { className: "items" });
+  const tool = h("div", { className: "menu tool" }, toolButton, toolList);
+  toolButton.addEventListener("click", () => tool.classList.toggle("open"));
+  for (const one of tools) {
+    const item = h("button", { type: "button", className: "item", dataset: { tool: one.tool } }, ...face(one, true));
+    item.addEventListener("click", () => {
+      state.tool = one.tool;
+      renderVideoEditor();
+    });
+    toolList.append(item);
+  }
   $("editor-bar").replaceChildren(
     tool,
     h("span", { className: "clock", textContent: info.name }),
@@ -321,7 +400,7 @@ function renderVideoEditor(): void {
     button("edit-reset", "", "Reset", !busy, () => {
       const bins = state.bins;
       const picture = state.picture;
-      video = { ...fresh(info), tool: state.tool, bins, picture, wanted: null };
+      video = { ...fresh(info), tool: state.tool, playhead: state.playhead, bins, picture, wanted: null };
       renderVideoEditor();
     }),
     button("edit-reveal", "", "Show in folder", true, () => void bridge.reveal(info.path).catch(host.fail)),
@@ -341,6 +420,45 @@ function renderVideoEditor(): void {
     });
     fields.append(h("div", { className: "field" }, h("label", { htmlFor: input.id, textContent: label }), input));
   };
+  // A level has a value and three keyframe buttons: previous, set, next.
+  for (const [name, label] of levelNames) {
+    const level = state.levels[name];
+    const input = h("input", { type: "text", spellcheck: false, disabled: busy, id: `edit-${name}`, value: String(Math.round(levelAt(level, state.playhead) * 100)) });
+    input.addEventListener("change", () => {
+      const typed = Number(input.value);
+      setLevel(level, state.playhead, Number.isFinite(typed) ? Math.min(100, Math.max(0, typed)) / 100 : 1);
+      paintVideo();
+    });
+    const jump = (direction: 1 | -1) => () => {
+      const frames = level.keys.map((key) => key.frame).filter((frame) => (direction === 1 ? frame > state.playhead : frame < state.playhead));
+      const target = direction === 1 ? frames[0] : frames[frames.length - 1];
+      if (target !== undefined) seek(target);
+    };
+    const key = (id: string, text: string, title: string, action: () => void) => {
+      const element = h("button", { type: "button", className: "key", id, textContent: text, title, disabled: busy });
+      element.addEventListener("click", action);
+      return element;
+    };
+    fields.append(
+      h(
+        "div",
+        { className: "field level" },
+        h("label", { htmlFor: input.id, textContent: label }),
+        input,
+        key(`prev-${name}`, "‹", "Previous keyframe", jump(-1)),
+        key(`key-${name}`, "◆", "Keyframe at the playhead", () => {
+          const at = level.keys.findIndex((one) => one.frame === state.playhead);
+          if (at >= 0) {
+            // The last keyframe leaves its value as the constant level.
+            if (level.keys.length === 1) level.base = level.keys[0]!.value;
+            level.keys.splice(at, 1);
+          } else setLevel(level, state.playhead, levelAt(level, state.playhead), true);
+          paintVideo();
+        }),
+        key(`next-${name}`, "›", "Next keyframe", jump(1)),
+      ),
+    );
+  }
   const seconds = (state.end - state.start) / info.fps;
   const { fades } = state;
   field("Video fade in (s)", fades.videoIn, seconds, 0.1, (value) => (fades.videoIn = value));
@@ -373,6 +491,8 @@ async function exportVideo(): Promise<void> {
       cropRight: crop.right,
       cropTop: crop.top,
       cropBottom: crop.bottom,
+      opacity: exported(state.levels.opacity, state.start, state.end, state.info.fps),
+      volume: exported(state.levels.volume, state.start, state.end, state.info.fps),
     });
   } catch (error) {
     state.exporting = "";
@@ -547,13 +667,21 @@ export function setupEditors(context: Host): void {
     },
   );
   setupCrop($<HTMLCanvasElement>("editor-picture"));
+  document.addEventListener("pointerdown", (event) => {
+    const list = document.querySelector(".menu.tool.open");
+    if (list && !list.contains(event.target as Node)) list.classList.remove("open");
+  });
   window.addEventListener("resize", paintVideo);
   document.addEventListener("keydown", (event) => {
     const state = video;
     const typing = event.target instanceof HTMLInputElement;
     if (!state || typing || state.exporting || !$("editor").classList.contains("on") || document.querySelector("dialog[open]")) return;
     const step = event.shiftKey ? state.info.fps : 1;
-    if (event.key === "ArrowLeft") seek(state.playhead - step);
+    const picked = event.ctrlKey || event.altKey ? undefined : tools.find((one) => one.key.toLowerCase() === event.key.toLowerCase());
+    if (picked) {
+      state.tool = picked.tool;
+      renderVideoEditor();
+    } else if (event.key === "ArrowLeft") seek(state.playhead - step);
     else if (event.key === "ArrowRight") seek(state.playhead + step);
     else if (event.key === "Escape") void closeVideoEditor();
     else return;

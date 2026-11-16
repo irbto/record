@@ -51,6 +51,10 @@ export interface VideoEdit {
   cropRight: number;
   cropTop: number;
   cropBottom: number;
+  /** Keyframes of the picture level: seconds from the range start, level 0 to 1. */
+  opacity: [number, number][];
+  /** Keyframes of the audio level, in the same form. */
+  volume: [number, number][];
 }
 
 export type EditUpdate =
