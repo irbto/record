@@ -339,6 +339,33 @@ Windows composes an HDR desktop in linear scRGB, where SDR content sits at the S
 
 The status line shows the SDR white level that the conversion used. Use `--sdr-white` if a picture is too bright or too dark.
 
+## Desktop dashboard
+
+`record-desktop` is one window for all three kinds of recording. It uses the same engines and the same stored settings as the terminal program.
+
+A switcher at the top selects the mode. The window opens on the mode that was last used.
+
+| Key | Action |
+|---|---|
+| `1`, `2`, `3` | Sound, Video, Screenshot |
+| `Space` | Start or stop the recording of the current mode |
+| `P` | Pause or continue |
+| `R`, `F`, `W`, `M`, `L` | Screenshot mode: region, fullscreen, active window, monitor, last region |
+
+- **Sound** shows the time, the left and right levels, and a scrolling waveform. It writes MP3 files to `Music\record`.
+- **Video** selects the screen and the frame rate and shows a live picture. It writes MP4 files to `Videos\record`.
+- **Screenshot** has the capture buttons, the after-capture switches, the upload destination, and the history with a preview. The global hotkeys work while the window is open.
+
+One sound or video recording runs at a time. The switcher marks the mode that is recording, and the other modes stay reachable.
+
+```powershell
+cargo build --release -p record-desktop
+target\release\record-desktop.exe
+target\release\record-desktop.exe video
+```
+
+The dashboard is new. The terminal program has more options for each mode, such as session folders, clips, crop, and the settings menu.
+
 ## Startup design
 
 The no-argument path does not start the general CLI parser. It creates the session and starts the audio worker before it starts the TUI.

@@ -6,6 +6,11 @@ This file gives the important project changes. The project uses [Semantic Versio
 
 ### Added
 
+- `record-desktop` is a desktop dashboard for sound, video, and screenshots in
+  one window. A switcher and the keys `1`, `2`, and `3` select the mode.
+- The capture engines are a separate `record-core` crate without a user
+  interface.
+
 - `record screenshot` opens a terminal hub with a capture menu, a preview,
   and a history of saved screenshots. It captures a region, every monitor,
   the active monitor, the active window, the last region, or a fixed

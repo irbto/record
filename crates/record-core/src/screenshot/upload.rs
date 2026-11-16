@@ -796,8 +796,14 @@ fn valid_key(key: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
+/// Reads one small settings file. A missing file gives `None`.
+#[must_use]
+pub fn read_setting(file: &str) -> Option<String> {
+    fs::read_to_string(settings_directory()?.join(file)).ok()
+}
+
 /// Writes one small settings file.
-pub(crate) fn write_setting(file: &str, text: &str) -> Result<(), String> {
+pub fn write_setting(file: &str, text: &str) -> Result<(), String> {
     let directory =
         settings_directory().ok_or_else(|| "the APPDATA folder is not available".to_owned())?;
     fs::create_dir_all(&directory)

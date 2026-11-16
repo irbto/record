@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/record-core"]
+members = ["crates/record-core", "crates/record-desktop"]
 resolver = "3"
 
 [workspace.package]

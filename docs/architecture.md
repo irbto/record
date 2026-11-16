@@ -8,6 +8,7 @@ The repository is a Cargo workspace.
 |---|---|---|
 | `record-core` | `crates/record-core` | The capture engines: audio, video, screenshots, uploads, stored settings, and the shared color theme. It has no user interface |
 | `record-tui` | the repository root | The `record` executable: command-line parsing and the terminal interface |
+| `record-desktop` | `crates/record-desktop` | The `record-desktop` executable: the egui dashboard |
 
 A user interface sends requests to an engine and draws the events that come back. It does not own capture state. This rule lets the terminal program and the desktop program use the same engines.
 
@@ -152,3 +153,11 @@ The `ui` module draws the terminal hub with Ratatui. It sends requests to the hu
 The saved PNG and the clipboard bitmap come from the annotated image, cropped to the selection. They never contain the toolbar or the selection dimming.
 
 The `upload` module reads ShareX custom uploader files, builds the request body, and reads the link from the response. It has no Windows dependency and no network access. The `http` module sends the request with WinHTTP, which uses the system proxy settings and certificate store.
+
+## Desktop dashboard
+
+The dashboard redraws the complete window from its state on every frame, like the terminal interface. Its `backend` module defines plain request and update types and an `Engines` trait. The dashboard code depends only on that boundary, so tests draw real frames with stand-in engines and no window.
+
+The `engines` module implements the boundary with `record-core`. Each recording runs on its own thread. A second thread translates engine events to updates, so capture never waits for drawing. The screenshot panel uses the same hub thread as the terminal hub.
+
+The `theme` module builds the egui style from the palette in `record-core`, which the terminal interface also uses.

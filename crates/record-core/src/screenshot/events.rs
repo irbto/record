@@ -5,13 +5,20 @@
 
 use std::{
     path::PathBuf,
-    sync::{Mutex, atomic::AtomicBool},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use crossbeam_channel::Receiver;
 
-use super::{CaptureMode, MonitorChoice, ScreenshotSummary, upload::Uploader};
+use super::{
+    CaptureMode, MonitorChoice, ScreenshotSummary, default_directory,
+    saved::SavedSettings,
+    upload::{Uploader, default_destination, resolve_destination},
+};
 
 /// The capture defaults that the settings menu can change while the hub runs.
 #[derive(Clone, Debug, PartialEq)]
@@ -75,6 +82,61 @@ pub enum HubEvent {
 }
 
 impl HubSettings {
+    /// Builds the hub settings from the stored defaults.
+    ///
+    /// The stored upload destination becomes active when it still resolves.
+    #[must_use]
+    pub fn from_saved(saved: &SavedSettings) -> Self {
+        let uploader =
+            default_destination().and_then(|destination| resolve_destination(&destination).ok());
+        Self {
+            options: Mutex::new(CaptureOptions {
+                directory: saved.folder.clone().unwrap_or_else(default_directory),
+                monitor: if saved.primary_monitor {
+                    MonitorChoice::Primary
+                } else {
+                    MonitorChoice::Pointer
+                },
+                sdr_white_nits: saved.sdr_white_nits,
+                auto_interval: Duration::from_secs_f32(saved.interval_seconds),
+                delay: Duration::from_secs_f32(saved.delay_seconds),
+            }),
+            copy: AtomicBool::new(saved.copy || !saved.save),
+            save: AtomicBool::new(saved.save),
+            upload: AtomicBool::new(uploader.is_some() && saved.upload),
+            uploader: Mutex::new(uploader),
+        }
+    }
+
+    /// Stores the current choices for later runs.
+    pub fn store(&self) -> Result<(), String> {
+        let options = self.options();
+        SavedSettings {
+            copy: self.copy.load(Ordering::Relaxed),
+            save: self.save.load(Ordering::Relaxed),
+            upload: self.upload.load(Ordering::Relaxed),
+            folder: Some(options.directory),
+            delay_seconds: options.delay.as_secs_f32(),
+            interval_seconds: options.auto_interval.as_secs_f32(),
+            primary_monitor: options.monitor == MonitorChoice::Primary,
+            sdr_white_nits: options.sdr_white_nits,
+        }
+        .store()
+    }
+
+    /// Makes a destination active and turns uploads on.
+    ///
+    /// Returns the display name of the destination.
+    pub fn select_destination(&self, destination: &str) -> Result<String, String> {
+        let uploader = resolve_destination(destination)?;
+        let name = uploader.name.clone();
+        if let Ok(mut active) = self.uploader.lock() {
+            *active = Some(uploader);
+        }
+        self.upload.store(true, Ordering::Relaxed);
+        Ok(name)
+    }
+
     /// Returns a copy of the current capture defaults.
     #[must_use]
     pub fn options(&self) -> CaptureOptions {
