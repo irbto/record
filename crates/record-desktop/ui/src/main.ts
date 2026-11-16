@@ -1035,8 +1035,20 @@ async function start(): Promise<void> {
     if (event.target === dialog) dialog.close();
   });
   $("output").addEventListener("click", () => void openFolder());
+  // The window buttons of the title bar.
+  const showMaximized = (maximized: boolean) => {
+    document.body.classList.toggle("maximized", maximized);
+    const label = maximized ? "Restore" : "Maximize";
+    $("win-max").title = label;
+    $("win-max").setAttribute("aria-label", label);
+  };
+  $("win-min").addEventListener("click", () => void bridge.minimize().catch(fail));
+  $("win-max").addEventListener("click", () => void bridge.toggleMaximize().then(showMaximized, fail));
+  $("win-close").addEventListener("click", () => void bridge.quit().catch(fail));
   window.addEventListener("hashchange", () => void enter(readRoute()));
   window.addEventListener("resize", () => {
+    // A double-click on the title bar or a snap also changes this state.
+    void bridge.isMaximized().then(showMaximized, () => undefined);
     if (app.route === "home") drawArt();
     if (app.route === "screenshot") void showShot();
   });

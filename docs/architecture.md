@@ -166,6 +166,8 @@ Every command runs away from the window thread. A command that receives a path a
 
 The screenshot screen uses the same hub thread as the terminal hub. The window minimizes before a capture that it started and returns when the capture ends.
 
+The window has no system frame. The interface draws the title bar, Tauri moves the window when the pointer drags the empty part of it, and the three window buttons call commands.
+
 A recording that runs when the window closes saves its file first. The window closes when the engine reports the end of the recording.
 
 The interface is TypeScript without a framework. `main.ts` holds the state and the screens, `menu.ts` the menu bar, `draw.ts` the canvas drawing, and `bridge.ts` the calls into Rust. The address of a screen is a hash route such as `#/audio`. `demo.ts` is a simulation of the engines for a plain browser, so the interface can be seen and tested without Windows. The colors are the palette of `record-core`, which the terminal interface also uses.

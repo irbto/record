@@ -44,8 +44,21 @@ kbd { font: inherit; color: var(--muted); }
 .purple { --tone: var(--purple); }
 .amber { --tone: var(--amber); }
 
+/* Title bar: the frame of the window. It holds the menus and the window
+   buttons, and the empty part of it moves the window. */
+.titlebar { display: flex; align-items: center; height: 34px; background: #12151b; border-bottom: 1px solid #1f2530; position: relative; z-index: 20; }
+.app-icon { width: 16px; height: 16px; margin: 0 6px 0 11px; flex: none; }
+.window-buttons { display: flex; margin-left: auto; align-self: stretch; }
+.window-buttons button { width: 46px; display: grid; place-items: center; color: var(--muted); }
+.window-buttons svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1; }
+.window-buttons button:hover { background: #232a36; color: var(--text); }
+.window-buttons button.close:hover { background: #e81123; color: #ffffff; }
+.window-buttons button:focus-visible { outline-offset: -3px; }
+.window-buttons .shrink, .maximized .window-buttons .grow { display: none; }
+.maximized .window-buttons .shrink { display: block; }
+
 /* Menu bar: File, View, Capture, Help. */
-.menubar { display: flex; padding: 3px 8px 0; position: relative; z-index: 20; }
+.menubar { display: flex; position: relative; }
 .menu { position: relative; }
 .menu > button { padding: 3px 10px; border-radius: 3px; color: var(--muted); }
 .menu > button:hover, .menu.open > button { background: var(--row); color: var(--text); }

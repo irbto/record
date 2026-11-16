@@ -78,6 +78,7 @@ export function demoBridge(): Bridge {
   let signal = 21.4;
   let sequence = 0;
   let autoTimer = 0;
+  let maximized = false;
   const desktop = document.createElement("canvas");
   desktop.width = 640;
   desktop.height = 360;
@@ -243,6 +244,14 @@ export function demoBridge(): Bridge {
     async openFolder() {},
     async copyPicture() {},
     async quit() {},
+    async minimize() {},
+    async toggleMaximize() {
+      maximized = !maximized;
+      return maximized;
+    },
+    async isMaximized() {
+      return maximized;
+    },
     on(event, handler) {
       (handlers[event] ??= [] as never[]).push(handler as never);
     },

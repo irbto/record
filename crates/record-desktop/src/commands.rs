@@ -615,6 +615,34 @@ pub fn quit(window: WebviewWindow) -> Result<(), String> {
         .map_err(|error| format!("could not close the window: {error}"))
 }
 
+/// Minimizes the window. The title bar of the interface calls this.
+#[tauri::command(async)]
+pub fn minimize(window: WebviewWindow) -> Result<(), String> {
+    window
+        .minimize()
+        .map_err(|error| format!("could not minimize the window: {error}"))
+}
+
+/// Maximizes the window, or restores it. Returns the new state.
+#[tauri::command(async)]
+pub fn toggle_maximize(window: WebviewWindow) -> Result<bool, String> {
+    let maximized = window.is_maximized().unwrap_or(false);
+    let changed = if maximized {
+        window.unmaximize()
+    } else {
+        window.maximize()
+    };
+    changed
+        .map(|()| !maximized)
+        .map_err(|error| format!("could not resize the window: {error}"))
+}
+
+/// Reports whether the window fills the screen.
+#[tauri::command(async)]
+pub fn is_maximized(window: WebviewWindow) -> bool {
+    window.is_maximized().unwrap_or(false)
+}
+
 /// Tells the interface that the window waits for the recording to save.
 pub fn announce_closing(app: &AppHandle) {
     let _ = app.emit(CLOSING_EVENT, ());

@@ -349,7 +349,7 @@ The window opens on **Home**. Home has one large button for each mode, the most 
 - **Screen capture** selects the monitor and the frame rate and shows a live picture. It writes MP4 files to `Videos\record`.
 - **Screenshot** has the capture list, the after-capture switches, the upload destination, and the history with a preview. The window minimizes during a capture, so it is never in its own picture.
 
-The menu bar holds every command. **File** starts, pauses, and saves a recording and opens Settings. **View** switches screens. **Capture** has every screenshot mode and the upload destination. **Help** lists the keys.
+The window draws its own title bar in place of the Windows frame. Drag it to move the window, and double-click it to maximize. The title bar holds the menus. **File** starts, pauses, and saves a recording and opens Settings. **View** switches screens. **Capture** has every screenshot mode and the upload destination. **Help** lists the keys.
 
 | Key | Action |
 |---|---|

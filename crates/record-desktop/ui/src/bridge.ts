@@ -62,6 +62,9 @@ export function desktopBridge(): Bridge | null {
     openFolder: (mode) => invoke("open_folder", { mode }),
     copyPicture: (path) => invoke("copy_picture", { path }),
     quit: () => invoke("quit"),
+    minimize: () => invoke("minimize"),
+    toggleMaximize: () => invoke("toggle_maximize"),
+    isMaximized: () => invoke("is_maximized"),
     on<K extends keyof Events>(event: K, handler: (payload: Events[K]) => void) {
       if (event === "drop") {
         void tauri.event.listen("tauri://drag-drop", (dropped) => {

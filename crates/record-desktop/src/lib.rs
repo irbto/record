@@ -1,7 +1,9 @@
 //! The desktop program of `record`: audio, video, and screenshots in one
 //! window.
 //!
-//! The window shows a web interface from `ui/dist`. This crate connects that
+//! The window has no system frame. The interface draws the title bar with
+//! the menus and the window buttons. The window shows a web interface from
+//! `ui/dist`. This crate connects that
 //! interface to the engines of `record-core`: [`commands`] holds what the
 //! interface can ask for, [`engines`] runs the recordings, and [`payload`]
 //! defines every value that crosses the boundary.
@@ -58,6 +60,9 @@ pub fn run() {
             commands::open_folder,
             commands::copy_picture,
             commands::quit,
+            commands::minimize,
+            commands::toggle_maximize,
+            commands::is_maximized,
         ])
         .run(tauri::generate_context!())
         .expect("the desktop program could not start");

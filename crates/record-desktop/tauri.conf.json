@@ -17,6 +17,7 @@
         "minWidth": 860,
         "minHeight": 580,
         "theme": "Dark",
+        "decorations": false,
         "backgroundColor": "#0c0c0c"
       }
     ],

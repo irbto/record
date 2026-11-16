@@ -8,7 +8,24 @@
 </head>
 <body>
 <div class="app">
-  <nav class="menubar" id="menubar" role="menubar" aria-label="Program menu"></nav>
+  <!-- The title bar replaces the frame of the system: drag it to move the
+       window, double-click it to maximize. -->
+  <header class="titlebar" data-tauri-drag-region="deep">
+    <svg class="app-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <rect width="16" height="16" rx="3.5" fill="#161b26"/>
+      <path d="M3.5 6V3.5H6M10 3.5h2.5V6M12.5 10v2.5H10M6 12.5H3.5V10" fill="none" stroke="#41d6e0" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="8" cy="8" r="2.2" fill="#f74b67"/>
+    </svg>
+    <nav class="menubar" id="menubar" role="menubar" aria-label="Program menu" data-tauri-drag-region="false"></nav>
+    <div class="window-buttons" data-tauri-drag-region="false">
+      <button type="button" id="win-min" aria-label="Minimize" title="Minimize"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10"/></svg></button>
+      <button type="button" id="win-max" aria-label="Maximize" title="Maximize">
+        <svg class="grow" viewBox="0 0 10 10" aria-hidden="true"><rect x=".5" y=".5" width="9" height="9" rx="1"/></svg>
+        <svg class="shrink" viewBox="0 0 10 10" aria-hidden="true"><rect x=".5" y="2.5" width="7" height="7" rx="1"/><path d="M2.5 2.5v-1a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-1"/></svg>
+      </button>
+      <button type="button" id="win-close" class="close" aria-label="Close" title="Close"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0 0l10 10M10 0L0 10"/></svg></button>
+    </div>
+  </header>
 
   <header class="tabs">
     <a class="brand" href="#/" aria-label="record, home">record</a>

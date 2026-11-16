@@ -120,5 +120,9 @@ export interface Bridge {
   openFolder(mode: Mode): Promise<void>;
   copyPicture(path: string): Promise<void>;
   quit(): Promise<void>;
+  minimize(): Promise<void>;
+  /** Maximizes or restores the window and returns the new state. */
+  toggleMaximize(): Promise<boolean>;
+  isMaximized(): Promise<boolean>;
   on<K extends keyof Events>(event: K, handler: (payload: Events[K]) => void): void;
 }
