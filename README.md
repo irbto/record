@@ -5,6 +5,14 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-7c3aed.svg)](LICENSE)
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-06b6d4.svg)](#platform-support)
 
+## HDR screenshots that look right
+
+**Turn on HDR, take a screenshot, and get the colors you see.**
+
+Many capture tools read an HDR desktop as plain 8-bit color, so the picture comes out bright and washed out. `record screenshot` reads the HDR surface and maps it to sRGB with the SDR white level of your monitor. It needs no setting and no color profile. SDR monitors use the direct path and are not changed.
+
+Read [HDR monitors](#hdr-monitors) for the details.
+
 ## Fast by design
 
 **26.76 ms median to active system audio capture.**
