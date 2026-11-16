@@ -618,6 +618,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs an audio output device, which the CI machine does not have"]
     fn native_worker_plays_pauses_seeks_and_finishes_a_bounded_range() {
         if check_video_support().is_err() {
             return;
