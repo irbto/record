@@ -150,7 +150,7 @@ The `hub` module owns one thread with a Windows message queue. Hotkeys, tray men
 
 The `ui` module draws the terminal hub with Ratatui. It sends requests to the hub thread and shows the reports that come back. The tray process runs the same message loop on its main thread and has no terminal.
 
-The saved PNG and the clipboard bitmap come from the annotated image, cropped to the selection. They never contain the toolbar or the selection dimming.
+The saved image file and the clipboard bitmap come from the annotated image, cropped to the selection. They never contain the toolbar or the selection dimming.
 
 The `upload` module reads ShareX custom uploader files, builds the request body, and reads the link from the response. It has no Windows dependency and no network access. The `http` module sends the request with WinHTTP, which uses the system proxy settings and certificate store.
 
@@ -160,14 +160,16 @@ The desktop program is a Tauri window. The engines stay in Rust, and the interfa
 
 The interface never touches a file or a device. It calls the functions of the `commands` module and listens for three events: `sound`, `video`, and `shots`. The `payload` module defines every value that crosses this boundary, and `ui/src/types.ts` mirrors it.
 
-The `engines` module runs the recordings. Each recording runs on its own thread. A second thread translates engine events to updates, so capture never waits for drawing. An audio update carries the extent of one sample block and 24 spectrum bands, about 47 times each second. The live picture of a video recording does not travel as an event. The interface asks for the newest picture when it is ready to draw one.
+The `engines` module runs the recordings. Each recording runs on its own thread. A second thread translates engine events to updates, so capture never waits for drawing. An audio update carries the extent of one sample block and 24 spectrum bands, about 47 times each second.
 
 Every command runs away from the window thread. A command that receives a path accepts it only when the file lies in one of the three output folders.
+
+The preview of the screen capture screen does not come from the recorder. While that screen is open, the interface asks a few times each second for a picture of the selected monitor. The `glance` module of `record-core` reads the desktop with GDI, scales it down, and the command returns a JPEG. The preview therefore works before a recording starts and on a still desktop.
 
 The screenshot screen uses the same hub thread as the terminal hub. The window minimizes before a capture that it started and returns when the capture ends.
 
 The window has no system frame. The interface draws the title bar, Tauri moves the window when the pointer drags the empty part of it, and the three window buttons call commands.
 
-A recording that runs when the window closes saves its file first. The window closes when the engine reports the end of the recording.
+The program keeps a tray icon and runs as one copy. The close button hides the window unless the user turned that off. A second start reaches the first copy through the single-instance plugin: it shows the window, or with `--quit` it ends the program. A recording that runs when the program quits saves its file first. The program exits when the engine reports the end of the recording.
 
 The interface is TypeScript without a framework. `main.ts` holds the state and the screens, `menu.ts` the menu bar, `draw.ts` the canvas drawing, and `bridge.ts` the calls into Rust. The address of a screen is a hash route such as `#/audio`. `demo.ts` is a simulation of the engines for a plain browser, so the interface can be seen and tested without Windows. The colors are the palette of `record-core`, which the terminal interface also uses.

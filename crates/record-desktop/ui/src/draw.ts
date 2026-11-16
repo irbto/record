@@ -1,8 +1,6 @@
 // Canvas drawing: the dot scope, the block spectrum, pictures, and the three
 // small drawings of the home screen.
 
-import type { Frame } from "./types";
-
 const styles = getComputedStyle(document.documentElement);
 
 /** Reads one color or font token from the style sheet. */
@@ -127,21 +125,6 @@ export function meter(bar: HTMLElement, label: HTMLElement, level: number): void
   const decibels = level > 0.001 ? Math.max(-60, Math.round(20 * Math.log10(level))) : -60;
   label.textContent = decibels <= -60 ? "-inf dB" : `${decibels} dB`;
   bar.style.width = `${Math.max(0, Math.min(100, ((decibels + 60) / 60) * 100))}%`;
-}
-
-let frameCanvas: HTMLCanvasElement | null = null;
-
-/** Keeps one live picture in a canvas of its own size. */
-export function keepFrame(frame: Frame): CanvasImageSource {
-  frameCanvas ??= document.createElement("canvas");
-  if (frameCanvas.width !== frame.width || frameCanvas.height !== frame.height) {
-    frameCanvas.width = frame.width;
-    frameCanvas.height = frame.height;
-  }
-  const pixels = new ImageData(frame.width, frame.height);
-  pixels.data.set(frame.rgba);
-  frameCanvas.getContext("2d")!.putImageData(pixels, 0, 0);
-  return frameCanvas;
 }
 
 /** Draws a picture as large as its panel allows, without distortion. */

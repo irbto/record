@@ -1,6 +1,6 @@
 // The bridge to the engines inside the desktop program.
 
-import type { Bridge, Events, Frame } from "./types";
+import type { Bridge, Events } from "./types";
 
 interface Tauri {
   core: { invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> };
@@ -43,25 +43,23 @@ export function desktopBridge(): Bridge | null {
     startRecording: (mode, monitor, fps) => invoke("start_recording", { mode, monitor, fps }),
     stopRecording: () => invoke("stop_recording"),
     setPaused: (paused) => invoke("set_paused", { paused }),
-    async videoFrame(after): Promise<Frame | null> {
-      const bytes = bytesOf(await invoke<unknown>("video_frame", { after }));
-      if (!bytes || bytes.byteLength <= 12) return null;
-      const head = new DataView(bytes, 0, 12);
-      const width = head.getUint32(4, true);
-      const height = head.getUint32(8, true);
-      if (bytes.byteLength !== 12 + width * height * 4) return null;
-      return { sequence: head.getUint32(0, true), width, height, rgba: new Uint8ClampedArray(bytes, 12) };
+    async monitorPreview({ left, top, width, height }) {
+      const bytes = bytesOf(await invoke<unknown>("monitor_preview", { left, top, width, height }));
+      if (!bytes || !bytes.byteLength) throw "The preview is empty";
+      return new Blob([bytes], { type: "image/jpeg" });
     },
     files: (mode) => invoke("files", { mode }),
     async picture(path) {
       const bytes = bytesOf(await invoke<unknown>("picture", { path }));
-      return bytes ? new Blob([bytes], { type: "image/png" }) : null;
+      // No type: the window finds the format from the bytes.
+      return bytes ? new Blob([bytes]) : null;
     },
     reveal: (path) => invoke("reveal", { path }),
     openFile: (path) => invoke("open_file", { path }),
     openFolder: (mode) => invoke("open_folder", { mode }),
     copyPicture: (path) => invoke("copy_picture", { path }),
     quit: () => invoke("quit"),
+    closeWindow: () => invoke("close_window"),
     minimize: () => invoke("minimize"),
     toggleMaximize: () => invoke("toggle_maximize"),
     isMaximized: () => invoke("is_maximized"),

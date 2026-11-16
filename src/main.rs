@@ -32,6 +32,7 @@ use record_tui::{
     screenshot::{
         CaptureMode, MonitorChoice, ScreenshotConfig, default_directory,
         events::{CaptureOptions, HubSettings},
+        format::ImageFormat,
         hub::{run_tray, tray_is_running},
         saved::SavedSettings,
         take_screenshot, unique_output_path,
@@ -394,6 +395,7 @@ fn run_screenshot(cli: Cli) -> Result<()> {
     let Some(Command::Screenshot {
         mode,
         output,
+        format,
         dir,
         monitor,
         region,
@@ -444,6 +446,7 @@ fn run_screenshot(cli: Cli) -> Result<()> {
         None => PathBuf::from("."),
     };
     let sdr_white = sdr_white.or(saved.sdr_white_nits);
+    let format = format.unwrap_or(saved.format);
     let mode = match (region, mode) {
         (Some(region), _) => Some(CaptureMode::Custom(region)),
         (None, Some(ScreenshotMode::Region)) => Some(CaptureMode::Region),
@@ -461,6 +464,7 @@ fn run_screenshot(cli: Cli) -> Result<()> {
         let settings = Arc::new(HubSettings {
             options: Mutex::new(CaptureOptions {
                 directory,
+                format,
                 monitor,
                 sdr_white_nits: sdr_white,
                 auto_interval: every
@@ -517,13 +521,12 @@ fn run_screenshot(cli: Cli) -> Result<()> {
     let explicit = match output {
         Some(mut path) => {
             if path.extension().is_none() {
-                path.set_extension("png");
+                path.set_extension(format.extension());
             }
-            if path
-                .extension()
-                .is_some_and(|extension| !extension.eq_ignore_ascii_case("png"))
-            {
-                bail!("the screenshot output file must use the .png extension");
+            if ImageFormat::from_path(&path).is_none() {
+                bail!(
+                    "the screenshot output file must end in .png, .jpg, .webp, .bmp, .gif, or .tiff"
+                );
             }
             if path.exists() && !force {
                 bail!(
@@ -545,9 +548,9 @@ fn run_screenshot(cli: Cli) -> Result<()> {
     for index in 0..repeats {
         let config = ScreenshotConfig {
             mode,
-            output: explicit
-                .clone()
-                .unwrap_or_else(|| unique_output_path(&directory, &video_timestamp())),
+            output: explicit.clone().unwrap_or_else(|| {
+                unique_output_path(&directory, &video_timestamp(), format.extension())
+            }),
             monitor,
             save: true,
             copy: !no_copy,

@@ -22,6 +22,8 @@ mod color;
 mod editor;
 /// Types shared by the capture thread and the terminal hub.
 pub mod events;
+/// File formats for saved screenshots.
+pub mod format;
 /// Saved screenshot files for the hub.
 pub mod history;
 #[cfg(windows)]
@@ -114,7 +116,7 @@ pub enum CaptureMode {
 pub struct ScreenshotConfig {
     /// What the screenshot contains.
     pub mode: CaptureMode,
-    /// PNG destination.
+    /// Image file. Its extension selects the format, and PNG is the default.
     pub output: PathBuf,
     /// Monitor for the region and monitor modes.
     pub monitor: MonitorChoice,
@@ -162,15 +164,16 @@ pub fn default_directory() -> PathBuf {
     )
 }
 
-/// Returns an unused `screenshot-TIMESTAMP.png` path inside a directory.
+/// Returns an unused `screenshot-TIMESTAMP` path with the given file
+/// extension inside a directory.
 #[must_use]
-pub fn unique_output_path(directory: &Path, timestamp: &str) -> PathBuf {
-    let first = directory.join(format!("screenshot-{timestamp}.png"));
+pub fn unique_output_path(directory: &Path, timestamp: &str, extension: &str) -> PathBuf {
+    let first = directory.join(format!("screenshot-{timestamp}.{extension}"));
     if !first.exists() {
         return first;
     }
     (2..)
-        .map(|count| directory.join(format!("screenshot-{timestamp}-{count}.png")))
+        .map(|count| directory.join(format!("screenshot-{timestamp}-{count}.{extension}")))
         .find(|path| !path.exists())
         .unwrap_or(first)
 }
@@ -284,19 +287,13 @@ pub fn take_screenshot(config: &ScreenshotConfig) -> anyhow::Result<Option<Scree
     };
     // Encode once. The file and the upload use the same bytes.
     let upload_wanted = config.upload.is_some() && copy_only_is_off;
-    let mut png = Vec::new();
-    if write_file || upload_wanted {
-        use image::ImageEncoder;
-
-        image::codecs::png::PngEncoder::new(&mut png)
-            .write_image(
-                &image.to_rgb_bytes(),
-                image.width(),
-                image.height(),
-                image::ExtendedColorType::Rgb8,
-            )
-            .context("could not encode the PNG image")?;
-    }
+    // The extension of the output path selects the format.
+    let format = format::ImageFormat::from_path(&config.output).unwrap_or_default();
+    let encoded = if write_file || upload_wanted {
+        format.encode(image.to_rgb_bytes(), image.width(), image.height())?
+    } else {
+        Vec::new()
+    };
     let output = if write_file {
         if let Some(parent) = config
             .output
@@ -306,7 +303,7 @@ pub fn take_screenshot(config: &ScreenshotConfig) -> anyhow::Result<Option<Scree
             fs::create_dir_all(parent)
                 .with_context(|| format!("could not create {}", parent.display()))?;
         }
-        fs::write(&config.output, &png)
+        fs::write(&config.output, &encoded)
             .with_context(|| format!("could not write {}", config.output.display()))?;
         Some(config.output.clone())
     } else {
@@ -318,7 +315,7 @@ pub fn take_screenshot(config: &ScreenshotConfig) -> anyhow::Result<Option<Scree
             || "screenshot.png".to_owned(),
             |name| name.to_string_lossy().into_owned(),
         );
-        let sent = http::send(&uploader.request(&file_name, &png))
+        let sent = http::send(&uploader.request(&file_name, &encoded))
             .map_err(|error| format!("{error:#}"))
             .and_then(|response| uploader.result(&response, &file_name));
         match sent {
@@ -395,10 +392,10 @@ mod tests {
     #[test]
     fn output_names_do_not_replace_existing_files() {
         let directory = tempfile::tempdir().unwrap();
-        let first = unique_output_path(directory.path(), "20260101-120000");
+        let first = unique_output_path(directory.path(), "20260101-120000", "png");
         assert!(first.ends_with("screenshot-20260101-120000.png"));
         fs::write(&first, b"x").unwrap();
-        let second = unique_output_path(directory.path(), "20260101-120000");
+        let second = unique_output_path(directory.path(), "20260101-120000", "png");
         assert!(second.ends_with("screenshot-20260101-120000-2.png"));
     }
 }

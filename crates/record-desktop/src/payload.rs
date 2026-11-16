@@ -155,6 +155,10 @@ pub struct Monitor {
     pub height: u32,
     /// Reports whether this is the primary monitor.
     pub primary: bool,
+    /// Left edge on the desktop in pixels.
+    pub left: i32,
+    /// Top edge on the desktop in pixels.
+    pub top: i32,
 }
 
 /// One saved recording or screenshot.
@@ -201,6 +205,12 @@ pub struct Snapshot {
     pub destinations: Vec<Destination>,
     /// Folder that receives screenshots.
     pub folder: String,
+    /// Name of the file format of saved screenshots.
+    pub format: String,
+    /// Every file format that the user can select.
+    pub formats: Vec<String>,
+    /// The close button hides the window and the program stays in the tray.
+    pub close_to_tray: bool,
     /// Folder that receives audio recordings.
     pub audio_folder: String,
     /// Folder that receives video recordings.

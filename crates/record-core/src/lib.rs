@@ -9,6 +9,8 @@
 pub mod audio;
 /// Saved clips and their conversions.
 pub mod clip;
+/// Small live pictures of the desktop for a preview.
+pub mod glance;
 /// HDR-aware screen capture with an on-screen annotation overlay.
 pub mod screenshot;
 /// Recording session folders and output file names.

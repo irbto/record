@@ -7,36 +7,121 @@
 //! interface to the engines of `record-core`: [`commands`] holds what the
 //! interface can ask for, [`engines`] runs the recordings, and [`payload`]
 //! defines every value that crosses the boundary.
+//!
+//! One copy of the program runs at a time. It keeps an icon in the tray, so
+//! the global hotkeys work while the window is hidden. A second start shows
+//! the window of the first copy, and `--quit` asks the first copy to exit.
 
 pub mod commands;
 pub mod engines;
 pub mod files;
 pub mod payload;
 
-use tauri::{Manager, WindowEvent};
+use record_core::screenshot::CaptureMode;
+use tauri::{
+    App, AppHandle, Manager, WindowEvent,
+    image::Image,
+    menu::{MenuBuilder, MenuItemBuilder},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
 
-use crate::commands::AppState;
+use crate::commands::{AppState, HIDDEN_ARGUMENT, QUIT_ARGUMENT};
 
-/// Opens the window and runs until the user closes it.
+/// Edge of the tray picture in pixels.
+const TRAY_EDGE: u32 = 32;
+/// The tray picture as packed RGBA bytes.
+const TRAY_PICTURE: &[u8] = include_bytes!("../icons/tray-32.rgba");
+
+/// Reports whether an argument list holds one argument.
+fn has_argument(arguments: &[String], wanted: &str) -> bool {
+    arguments.iter().skip(1).any(|argument| argument == wanted)
+}
+
+/// Adds the tray icon and its menu.
+fn add_tray(app: &App) -> tauri::Result<()> {
+    let item = |id: &str, label: &str| MenuItemBuilder::with_id(id, label).build(app);
+    let menu = MenuBuilder::new(app)
+        .item(&item("open", "Open record")?)
+        .separator()
+        .item(&item("region", "Capture region")?)
+        .item(&item("fullscreen", "Capture fullscreen")?)
+        .item(&item("window", "Capture active window")?)
+        .separator()
+        .item(&item("quit", "Quit")?)
+        .build()?;
+    TrayIconBuilder::with_id("record")
+        .icon(Image::new(TRAY_PICTURE, TRAY_EDGE, TRAY_EDGE))
+        .tooltip("record")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app: &AppHandle, event| match event.id().as_ref() {
+            "open" => commands::show_window(app),
+            "region" => commands::capture_from_tray(app, CaptureMode::Region),
+            "fullscreen" => commands::capture_from_tray(app, CaptureMode::Fullscreen),
+            "window" => commands::capture_from_tray(app, CaptureMode::Window),
+            "quit" => commands::request_quit(app),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                commands::show_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+/// Opens the window and runs until the user quits.
 ///
 /// # Panics
 ///
 /// Panics when the window system cannot start, because nothing can run then.
 pub fn run() {
+    let arguments: Vec<String> = std::env::args().collect();
     tauri::Builder::default()
-        .manage(AppState::start())
-        .setup(|app| {
+        // This runs in the first copy when a second copy starts.
+        .plugin(tauri_plugin_single_instance::init(|app, arguments, _| {
+            if has_argument(&arguments, QUIT_ARGUMENT) {
+                commands::request_quit(app);
+            } else {
+                commands::show_window(app);
+            }
+        }))
+        .setup(move |app| {
+            // Nothing runs, so there is nothing to quit.
+            if has_argument(&arguments, QUIT_ARGUMENT) {
+                app.handle().exit(0);
+                return Ok(());
+            }
+            app.manage(AppState::start());
             commands::forward_captures(app.handle());
+            add_tray(app)?;
+            if !has_argument(&arguments, HIDDEN_ARGUMENT) {
+                commands::show_window(app.handle());
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
-            // A recording that runs must close its file first. The window
-            // closes when the file is saved.
-            if let WindowEvent::CloseRequested { api, .. } = event
-                && window.state::<AppState>().hold_window()
-            {
+            let WindowEvent::CloseRequested { api, .. } = event else {
+                return;
+            };
+            let Some(state) = window.try_state::<AppState>() else {
+                return;
+            };
+            if state.close_to_tray() {
+                // The program stays in the tray and keeps its hotkeys.
                 api.prevent_close();
-                commands::announce_closing(window.app_handle());
+                let _ = window.hide();
+            } else if state.hold_window() {
+                // A recording that runs must close its file first. The
+                // program exits when the file is saved.
+                api.prevent_close();
+                commands::request_quit(window.app_handle());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -49,10 +134,10 @@ pub fn run() {
             commands::capture,
             commands::toggle_auto,
             commands::monitors,
+            commands::monitor_preview,
             commands::start_recording,
             commands::stop_recording,
             commands::set_paused,
-            commands::video_frame,
             commands::files,
             commands::picture,
             commands::reveal,
@@ -60,6 +145,7 @@ pub fn run() {
             commands::open_folder,
             commands::copy_picture,
             commands::quit,
+            commands::close_window,
             commands::minimize,
             commands::toggle_maximize,
             commands::is_maximized,

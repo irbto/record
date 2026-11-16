@@ -124,11 +124,10 @@ main { min-height: 0; padding: 22px 18px 14px; }
 /* Home. */
 #home { grid-template-columns: minmax(0, 1.9fr) minmax(0, 1fr); grid-template-rows: minmax(210px, 1.15fr) minmax(0, 1fr); }
 .choices { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; min-height: 0; }
-.choice { display: grid; grid-template-rows: minmax(0, 1fr) auto auto auto; gap: 4px; padding: 16px 14px 12px; }
+.choice { display: grid; grid-template-rows: minmax(0, 1fr) auto auto; gap: 4px; padding: 16px 14px 12px; }
 .choice canvas { min-height: 0; margin-bottom: 8px; }
 .choice strong { font-size: 18px; }
-.choice p { color: var(--muted); min-height: 2.8em; }
-.choice .meta { display: flex; justify-content: space-between; margin-top: 6px; color: var(--tone); }
+.choice .meta { display: flex; justify-content: space-between; margin-top: 2px; color: var(--tone); }
 .choice:hover, .choice:focus-visible { border-color: var(--tone); background: #0f1218; outline: 0; }
 .choice.busy > .title::after { content: " ●"; color: var(--red); }
 
@@ -205,12 +204,12 @@ dialog::backdrop { background: rgb(0 0 0 / 0.72); }
 .sheet { background: var(--ground); }
 .sheet > .title { background: var(--ground); }
 .sheet > .body { padding: 18px 14px 12px; display: grid; gap: 12px; max-height: calc(100vh - 90px); overflow-y: auto; }
-.field { display: grid; grid-template-columns: 22ch minmax(0, 1fr); gap: 4px 2ch; align-items: baseline; }
+.field { display: grid; grid-template-columns: 20ch minmax(0, 1fr); gap: 4px 2ch; align-items: baseline; }
 .field label { color: var(--text); }
-.field small, .hint { grid-column: 2; font-size: inherit; color: var(--muted); }
-.hint { grid-column: 1 / -1; }
-input[type="text"] { width: 100%; background: #111620; border: 1.5px solid var(--line); border-radius: 4px; padding: 3px 8px; user-select: text; cursor: text; }
-input[type="text"]:focus { outline: 0; border-color: var(--cyan); }
+.hint { color: var(--muted); }
+input[type="text"], select { width: 100%; background: #111620; border: 1.5px solid var(--line); border-radius: 4px; padding: 3px 8px; user-select: text; cursor: text; }
+input[type="text"]:focus, select:focus { outline: 0; border-color: var(--cyan); }
+select { font: inherit; color: inherit; cursor: pointer; }
 .inline { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 .problem { color: var(--red); min-height: 1.4em; }

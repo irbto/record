@@ -49,7 +49,7 @@ use windows::{
 
 use super::{
     CaptureMode, ScreenshotConfig,
-    canvas::{Area, Canvas, Point, rgb},
+    canvas::{Area, Canvas, rgb},
     events::{CaptureHub, HubEvent, HubRequest, HubSettings},
     last_region, overlay, take_screenshot, unique_output_path,
 };
@@ -271,7 +271,11 @@ fn message_loop(
             let options = settings.options();
             let config = ScreenshotConfig {
                 mode,
-                output: unique_output_path(&options.directory, &video_timestamp()),
+                output: unique_output_path(
+                    &options.directory,
+                    &video_timestamp(),
+                    options.format.extension(),
+                ),
                 monitor: options.monitor,
                 save: settings.save.load(Ordering::Relaxed),
                 copy: settings.copy.load(Ordering::Relaxed),
@@ -387,41 +391,28 @@ impl Drop for TrayIcon {
     }
 }
 
-/// Draws the 32-pixel tray icon: a viewfinder frame around a record dot.
+/// Draws the 32-pixel tray icon: a pulse of sound on the dot grid, cyan for
+/// the left channel, green for the right, and the red record line between.
 #[must_use]
 pub(crate) fn icon_image() -> Canvas {
-    let mut icon = Canvas::new(32, 32, rgb(0x16, 0x1b, 0x26));
-    let frame = rgb(0x41, 0xd6, 0xe0);
-    for (x, y, dx, dy) in [
-        (4, 4, 1, 1),
-        (27, 4, -1, 1),
-        (4, 27, 1, -1),
-        (27, 27, -1, -1),
-    ] {
-        let (far_x, far_y) = (x + 8 * dx, y + 8 * dy);
-        icon.fill_rect(
-            Area::new(
-                x.min(far_x),
-                y.min(y + 2 * dy),
-                x.max(far_x) + 1,
-                y.max(y + 2 * dy) + 1,
-            ),
-            frame,
-            255,
-        );
-        icon.fill_rect(
-            Area::new(
-                x.min(x + 2 * dx),
-                y.min(far_y),
-                x.max(x + 2 * dx) + 1,
-                y.max(far_y) + 1,
-            ),
-            frame,
-            255,
-        );
+    /// Distance between two dots in pixels.
+    const PITCH: i32 = 6;
+    /// Edge of one dot in pixels.
+    const DOT: i32 = 4;
+    /// Number of dots above and below the middle row in each column.
+    const REACH: [i32; 5] = [0, 1, 2, 1, 0];
+    let mut icon = Canvas::new(32, 32, rgb(0x0c, 0x0c, 0x0c));
+    for (column, reach) in (0_i32..).zip(REACH) {
+        let color = match column {
+            0 | 1 => rgb(0x41, 0xd6, 0xe0),
+            2 => rgb(0xf7, 0x4b, 0x67),
+            _ => rgb(0x48, 0xd6, 0x93),
+        };
+        for step in -reach..=reach {
+            let (left, top) = (2 + column * PITCH, 2 + (2 + step) * PITCH);
+            icon.fill_rect(Area::new(left, top, left + DOT, top + DOT), color, 255);
+        }
     }
-    let center = Point::new(16, 16);
-    icon.stroke_line(center, center, 11.0, rgb(0xf7, 0x4b, 0x67));
     icon
 }
 

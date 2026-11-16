@@ -16,6 +16,7 @@ use crossbeam_channel::Receiver;
 
 use super::{
     CaptureMode, MonitorChoice, ScreenshotSummary, default_directory,
+    format::ImageFormat,
     saved::SavedSettings,
     upload::{Uploader, default_destination, resolve_destination},
 };
@@ -23,8 +24,10 @@ use super::{
 /// The capture defaults that the settings menu can change while the hub runs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CaptureOptions {
-    /// Folder that receives the PNG files.
+    /// Folder that receives the image files.
     pub directory: PathBuf,
+    /// File format of saved screenshots.
+    pub format: ImageFormat,
     /// Monitor for the region and monitor modes.
     pub monitor: MonitorChoice,
     /// Overrides the SDR white level that Windows reports, in nits.
@@ -92,6 +95,7 @@ impl HubSettings {
         Self {
             options: Mutex::new(CaptureOptions {
                 directory: saved.folder.clone().unwrap_or_else(default_directory),
+                format: saved.format,
                 monitor: if saved.primary_monitor {
                     MonitorChoice::Primary
                 } else {
@@ -116,6 +120,7 @@ impl HubSettings {
             save: self.save.load(Ordering::Relaxed),
             upload: self.upload.load(Ordering::Relaxed),
             folder: Some(options.directory),
+            format: options.format,
             delay_seconds: options.delay.as_secs_f32(),
             interval_seconds: options.auto_interval.as_secs_f32(),
             primary_monitor: options.monitor == MonitorChoice::Primary,

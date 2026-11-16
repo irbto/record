@@ -2,7 +2,7 @@
 // viewed and tested without Windows. Nothing is recorded.
 
 import { standInDesktop, standInSample } from "./draw";
-import type { Bridge, CaptureKind, Events, FileEntry, Frame, Mode, Snapshot } from "./types";
+import type { Bridge, CaptureKind, Events, FileEntry, Mode, Snapshot } from "./types";
 
 const two = (value: number) => String(value).padStart(2, "0");
 
@@ -42,6 +42,9 @@ export function demoBridge(): Bridge {
       { id: "litterbox", name: "Litterbox", note: "no account, deleted after 72 hours", keyLabel: null, keySource: "" },
     ],
     folder: folders.screenshot,
+    format: "PNG",
+    formats: ["PNG", "JPEG", "WebP", "BMP", "GIF", "TIFF"],
+    closeToTray: true,
     audioFolder: folders.audio,
     videoFolder: folders.video,
     delaySeconds: 3,
@@ -76,7 +79,6 @@ export function demoBridge(): Bridge {
 
   let running: { mode: Mode; name: string; timer: number; frames: number; paused: boolean } | null = null;
   let signal = 21.4;
-  let sequence = 0;
   let autoTimer = 0;
   let maximized = false;
   const desktop = document.createElement("canvas");
@@ -84,7 +86,8 @@ export function demoBridge(): Bridge {
   desktop.height = 360;
 
   const finishCapture = () => {
-    const name = `screenshot-${stamp()}.png`;
+    const extension = state.format === "JPEG" ? "jpg" : state.format.toLowerCase();
+    const name = `screenshot-${stamp()}.${extension}`;
     if (state.save) files.screenshot.unshift(entry("screenshot", name, 0));
     emit("shots", {
       kind: "finished",
@@ -114,6 +117,10 @@ export function demoBridge(): Bridge {
       if (name === "folder") {
         if (!text) throw "Enter a folder path";
         state.folder = text;
+      } else if (name === "format") {
+        const format = state.formats.find((one) => one.toLowerCase() === text.toLowerCase());
+        if (!format) throw `${text} is not an image format`;
+        state.format = format;
       } else if (name === "sdrWhiteNits") {
         const nits = Number(text);
         if (text && text.toLowerCase() !== "auto" && !(nits >= 80 && nits <= 1000)) throw "enter a white level from 80 to 1000 nits, or leave it empty";
@@ -167,8 +174,8 @@ export function demoBridge(): Bridge {
     },
     async monitors() {
       return [
-        { index: 0, width: 2560, height: 1440, primary: false },
-        { index: 1, width: 1920, height: 1080, primary: true },
+        { index: 0, width: 2560, height: 1440, primary: false, left: -2560, top: 0 },
+        { index: 1, width: 1920, height: 1080, primary: true, left: 0, top: 0 },
       ];
     },
     async startRecording(mode, _monitor, fps) {
@@ -224,14 +231,14 @@ export function demoBridge(): Bridge {
       running.paused = paused;
       return paused;
     },
-    async videoFrame(after): Promise<Frame | null> {
-      if (!running || running.mode !== "video" || running.paused) return null;
-      sequence += 1;
-      if (sequence === after) return null;
-      const g = desktop.getContext("2d", { willReadFrequently: true })!;
-      standInDesktop(g, desktop.width, desktop.height, signal);
-      const pixels = g.getImageData(0, 0, desktop.width, desktop.height);
-      return { sequence, width: desktop.width, height: desktop.height, rgba: pixels.data };
+    async monitorPreview(monitor) {
+      // The stand-in desktop moves on its own clock, as a real one does.
+      const shape = monitor.width / monitor.height;
+      desktop.height = Math.round(desktop.width / shape);
+      standInDesktop(desktop.getContext("2d")!, desktop.width, desktop.height, performance.now() / 1000 + monitor.index * 40);
+      return new Promise<Blob>((resolve, reject) => {
+        desktop.toBlob((blob) => (blob ? resolve(blob) : reject("The preview is empty")), "image/jpeg", 0.8);
+      });
     },
     async files(mode) {
       return files[mode].map((file) => ({ ...file }));
@@ -244,6 +251,7 @@ export function demoBridge(): Bridge {
     async openFolder() {},
     async copyPicture() {},
     async quit() {},
+    async closeWindow() {},
     async minimize() {},
     async toggleMaximize() {
       maximized = !maximized;

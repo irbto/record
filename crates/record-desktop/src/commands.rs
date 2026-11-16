@@ -16,20 +16,28 @@ use std::{
 };
 
 use record_core::{
+    glance::glance,
     screenshot::{
         CaptureMode, MonitorChoice, copy_file_to_clipboard,
         events::{CaptureHub, HubEvent, HubRequest, HubSettings},
+        format::{ImageFormat, is_image_file, jpeg, viewable_bytes},
+        history::list_history,
         hub::Hub,
-        saved::{SavedSettings, autostart_enabled, parse_sdr_white, parse_seconds, set_autostart},
-        upload::{PRESETS, Preset, import_sxcu, list_destinations, set_default_destination},
+        saved::{
+            SavedSettings, autostart_enabled, parse_sdr_white, parse_seconds, set_autostart_line,
+        },
+        upload::{
+            PRESETS, Preset, import_sxcu, list_destinations, read_setting, set_default_destination,
+            write_setting,
+        },
     },
     video::{enumerate_monitors, video_timestamp},
 };
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, ipc::Response};
 
 use crate::{
-    engines::{Control, Picture, Report, default_folder, start_sound, start_video, stopping},
-    files::{recent_files, within},
+    engines::{Control, Report, default_folder, start_sound, start_video, stopping},
+    files::{FILE_LIMIT, recent_files, within},
     payload::{
         Destination, FileEntry, Mode, Monitor, ShotUpdate, Snapshot, SoundUpdate, VideoUpdate,
         file_name,
@@ -50,6 +58,16 @@ const DEFAULT_FPS: u32 = 60;
 const MAIN_WINDOW: &str = "main";
 /// Time that Windows needs to move a minimized window off the screen.
 const MINIMIZE_TIME: Duration = Duration::from_millis(300);
+/// Longest edge of the live monitor preview in pixels.
+const PREVIEW_EDGE: u32 = 1_280;
+/// JPEG quality of the live monitor preview.
+const PREVIEW_QUALITY: u8 = 80;
+/// Settings file that holds the close-to-tray switch.
+const TRAY_SETTING: &str = "desktop-close-to-tray.txt";
+/// Argument that starts the program without showing its window.
+pub const HIDDEN_ARGUMENT: &str = "--hidden";
+/// Argument that asks the running program to save its work and exit.
+pub const QUIT_ARGUMENT: &str = "--quit";
 
 /// Everything the commands share.
 pub struct AppState {
@@ -59,10 +77,10 @@ pub struct AppState {
     hub: Result<Hub, String>,
     /// The recording that runs now.
     running: Mutex<Option<(Mode, Control)>>,
-    /// The newest live picture of a video recording.
-    picture: Arc<Mutex<Picture>>,
-    /// The window closes when the running recording has saved its file.
+    /// The program exits when the running recording has saved its file.
     closing: AtomicBool,
+    /// The close button hides the window and the program stays in the tray.
+    close_to_tray: AtomicBool,
     /// Reports whether the tray starts at sign-in.
     autostart: AtomicBool,
     /// Registration result of each global hotkey.
@@ -90,8 +108,10 @@ impl AppState {
             settings,
             hub,
             running: Mutex::new(None),
-            picture: Arc::new(Mutex::new(Picture::default())),
             closing: AtomicBool::new(false),
+            close_to_tray: AtomicBool::new(
+                read_setting(TRAY_SETTING).is_none_or(|text| text.trim() != "false"),
+            ),
             autostart: AtomicBool::new(autostart_enabled()),
             hotkeys: Mutex::new([false; 3]),
             auto_active: AtomicBool::new(false),
@@ -164,6 +184,12 @@ impl AppState {
                 .map(|uploader| uploader.name),
             destinations,
             folder: options.directory.display().to_string(),
+            format: options.format.name().to_owned(),
+            formats: ImageFormat::ALL
+                .iter()
+                .map(|format| format.name().to_owned())
+                .collect(),
+            close_to_tray: self.close_to_tray(),
             audio_folder: default_folder(Mode::Audio).display().to_string(),
             video_folder: default_folder(Mode::Video).display().to_string(),
             delay_seconds: options.delay.as_secs_f32(),
@@ -178,9 +204,15 @@ impl AppState {
         }
     }
 
-    /// Asks the running recording to save its file before the window closes.
+    /// Reports whether the close button hides the window to the tray.
+    #[must_use]
+    pub fn close_to_tray(&self) -> bool {
+        self.close_to_tray.load(Ordering::Relaxed)
+    }
+
+    /// Asks the running recording to save its file before the program exits.
     ///
-    /// Returns `false` when nothing records, so the window can close at once.
+    /// Returns `false` when nothing records, so the program can exit at once.
     pub fn hold_window(&self) -> bool {
         match &*lock(&self.running) {
             Some((_, control)) => {
@@ -301,8 +333,20 @@ pub fn set_flag(state: State<'_, AppState>, name: &str, value: bool) -> Result<S
             };
         }
         "autostart" => {
-            set_autostart(value)?;
+            // The sign-in entry starts this program in the tray.
+            let line = if value {
+                let program = std::env::current_exe()
+                    .map_err(|error| format!("could not find this program: {error}"))?;
+                Some(format!("\"{}\" {HIDDEN_ARGUMENT}", program.display()))
+            } else {
+                None
+            };
+            set_autostart_line(line.as_deref())?;
             state.autostart.store(value, Ordering::Relaxed);
+        }
+        "closeToTray" => {
+            write_setting(TRAY_SETTING, if value { "true" } else { "false" })?;
+            state.close_to_tray.store(value, Ordering::Relaxed);
         }
         _ => return Err(format!("{name} is not a switch")),
     }
@@ -333,6 +377,10 @@ pub fn set_setting(
             lock(&settings.options).auto_interval = Duration::from_secs_f32(parse_seconds(value)?);
         }
         "sdrWhiteNits" => lock(&settings.options).sdr_white_nits = parse_sdr_white(value)?,
+        "format" => {
+            lock(&settings.options).format = ImageFormat::parse(value)
+                .ok_or_else(|| format!("{value} is not an image format"))?;
+        }
         _ => return Err(format!("{name} is not a setting")),
     }
     state.stored()
@@ -427,8 +475,24 @@ pub fn monitors() -> Result<Vec<Monitor>, String> {
             width: monitor.width,
             height: monitor.height,
             primary: monitor.primary,
+            left: monitor.left,
+            top: monitor.top,
         })
         .collect())
+}
+
+/// Returns a small JPEG picture of one area of the desktop.
+///
+/// The interface asks for it a few times each second while the screen
+/// capture screen is open. It shows the monitor before, during, and after a
+/// recording, also when nothing on the monitor moves.
+#[tauri::command(async)]
+pub fn monitor_preview(left: i32, top: i32, width: u32, height: u32) -> Result<Response, String> {
+    let picture =
+        glance(left, top, width, height, PREVIEW_EDGE).map_err(|error| format!("{error:#}"))?;
+    jpeg(&picture.rgb, picture.width, picture.height, PREVIEW_QUALITY)
+        .map(Response::new)
+        .map_err(|error| format!("{error:#}"))
 }
 
 /// Starts an audio or a video recording and returns the path of its file.
@@ -472,7 +536,6 @@ pub fn start_recording(
         });
         start_sound(output, &control, report);
     } else {
-        *lock(&state.picture) = Picture::default();
         let report: Report<VideoUpdate> = Arc::new(move |update| {
             let ended = matches!(update, VideoUpdate::Stopped { .. });
             if ended {
@@ -488,7 +551,6 @@ pub fn start_recording(
             monitor.unwrap_or(0),
             fps.unwrap_or(DEFAULT_FPS).clamp(1, 240),
             &control,
-            Arc::clone(&state.picture),
             report,
         );
     }
@@ -515,44 +577,37 @@ pub fn set_paused(state: State<'_, AppState>, paused: bool) -> bool {
     }
 }
 
-/// Returns the newest live picture when the interface does not have it yet.
-///
-/// The answer holds three little-endian `u32` values, the sequence number,
-/// the width, and the height, and then the RGBA bytes. An empty answer means
-/// that there is no newer picture.
-#[tauri::command(async)]
-pub fn video_frame(state: State<'_, AppState>, after: u32) -> Response {
-    let picture = lock(&state.picture);
-    if picture.sequence == after || picture.rgba.is_empty() {
-        return Response::new(Vec::new());
-    }
-    let mut bytes = Vec::with_capacity(12 + picture.rgba.len());
-    for value in [picture.sequence, picture.width, picture.height] {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes.extend_from_slice(&picture.rgba);
-    Response::new(bytes)
-}
-
 /// Lists the saved files of one mode, newest first.
 #[tauri::command(async)]
 pub fn files(state: State<'_, AppState>, mode: Mode) -> Vec<FileEntry> {
-    recent_files(&state.folder(mode), mode.extension(), SystemTime::now())
+    let now = SystemTime::now();
+    if mode != Mode::Screenshot {
+        return recent_files(&state.folder(mode), mode.extension(), now);
+    }
+    // Screenshots come in several formats.
+    list_history(&state.folder(mode))
+        .into_iter()
+        .take(FILE_LIMIT)
+        .map(|entry| FileEntry {
+            name: entry.name,
+            path: entry.path.display().to_string(),
+            age_seconds: now
+                .duration_since(entry.modified)
+                .map_or(0, |age| age.as_secs()),
+        })
+        .collect()
 }
 
-/// Returns the bytes of one saved screenshot.
+/// Returns the bytes of one saved screenshot in a form the window can show.
 #[tauri::command(async)]
 pub fn picture(state: State<'_, AppState>, path: &str) -> Result<Response, String> {
     let file = state.listed(path)?;
-    let is_png = file
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"));
-    if !is_png {
+    if !is_image_file(&file) {
         return Err(format!("{} is not a screenshot", file_name(&file)));
     }
-    fs::read(&file)
+    viewable_bytes(&file)
         .map(Response::new)
-        .map_err(|error| format!("could not read {}: {error}", file_name(&file)))
+        .map_err(|error| format!("{error:#}"))
 }
 
 /// Starts a helper program and formats a failure.
@@ -607,9 +662,43 @@ fn plain_path(path: &Path) -> PathBuf {
     }
 }
 
-/// Closes the window. A running recording saves its file first.
+/// Shows the window and brings it to the front.
+pub fn show_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// Ends the program. A running recording saves its file first.
+pub fn request_quit(app: &AppHandle) {
+    if app.state::<AppState>().hold_window() {
+        let _ = app.emit(CLOSING_EVENT, ());
+    } else {
+        app.exit(0);
+    }
+}
+
+/// Starts one screenshot from the tray menu. The window stays as it is.
+pub fn capture_from_tray(app: &AppHandle, mode: CaptureMode) {
+    if let Ok(hub) = &app.state::<AppState>().hub {
+        hub.request(HubRequest::Capture(mode));
+    }
+}
+
+/// Ends the program. The File menu calls this.
 #[tauri::command(async)]
-pub fn quit(window: WebviewWindow) -> Result<(), String> {
+pub fn quit(app: AppHandle) {
+    request_quit(&app);
+}
+
+/// Closes the window as the close button of a title bar does.
+///
+/// The window event of the program decides what a close means: it hides the
+/// window to the tray, or it ends the program.
+#[tauri::command(async)]
+pub fn close_window(window: WebviewWindow) -> Result<(), String> {
     window
         .close()
         .map_err(|error| format!("could not close the window: {error}"))
@@ -641,9 +730,4 @@ pub fn toggle_maximize(window: WebviewWindow) -> Result<bool, String> {
 #[tauri::command(async)]
 pub fn is_maximized(window: WebviewWindow) -> bool {
     window.is_maximized().unwrap_or(false)
-}
-
-/// Tells the interface that the window waits for the recording to save.
-pub fn announce_closing(app: &AppHandle) {
-    let _ = app.emit(CLOSING_EVENT, ());
 }

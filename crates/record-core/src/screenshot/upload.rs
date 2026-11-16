@@ -12,6 +12,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use super::format::ImageFormat;
+
 /// Deepest nesting that the JSON reader accepts.
 const JSON_DEPTH_LIMIT: usize = 64;
 
@@ -608,9 +610,14 @@ impl Uploader {
         Self::preset("imgur", client_id).unwrap_or_else(|| unreachable!("imgur is a preset"))
     }
 
-    /// Builds the HTTP request that uploads one PNG file.
+    /// Builds the HTTP request that uploads one image file.
+    ///
+    /// The extension of the file name selects the media type.
     pub(crate) fn request(&self, file_name: &str, png: &[u8]) -> HttpRequest {
         let fill = |text: &str| text.replace("{filename}", file_name);
+        let mime = ImageFormat::from_path(Path::new(file_name))
+            .unwrap_or_default()
+            .mime();
         let mut url = self.request_url.clone();
         for (index, (name, value)) in self.parameters.iter().enumerate() {
             let joiner = if index == 0 && !url.contains('?') {
@@ -631,7 +638,7 @@ impl Uploader {
             .collect();
         let body = match self.body {
             BodyKind::Binary => {
-                headers.push(("Content-Type".to_owned(), "image/png".to_owned()));
+                headers.push(("Content-Type".to_owned(), mime.to_owned()));
                 png.to_vec()
             }
             BodyKind::Multipart => {
@@ -653,7 +660,7 @@ impl Uploader {
                 }
                 body.extend_from_slice(
                     format!(
-                        "--{boundary}\r\nContent-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\nContent-Type: image/png\r\n\r\n",
+                        "--{boundary}\r\nContent-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\nContent-Type: {mime}\r\n\r\n",
                         quote(&self.file_form_name),
                         quote(file_name)
                     )

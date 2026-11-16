@@ -1,6 +1,6 @@
 # record
 
-> Type `record` for MP3 system audio. Type `record video` for H.264/AAC MP4 screen capture. Type `record screenshot` for annotated, HDR-correct PNG screenshots.
+> Type `record` for MP3 system audio. Type `record video` for H.264/AAC MP4 screen capture. Type `record screenshot` for annotated, HDR-correct screenshots.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-7c3aed.svg)](LICENSE)
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-06b6d4.svg)](#platform-support)
@@ -223,7 +223,7 @@ HDR displays are captured and encoded as SDR. The DXGI desktop duplication API r
 
 `Tab` moves between the menu and the history. `Enter` runs the selected entry or opens the selected image. `C` copies the selected image, `O` opens the screenshots folder, `U` and `P` control uploads, and `Q` quits. The hub shows `in use` beside a hotkey that another program holds.
 
-Each capture writes a PNG to `Pictures\Screenshots` and places the image on the clipboard. The after-capture switches in the menu turn each task on or off, and the hub remembers them.
+Each capture writes an image file to `Pictures\Screenshots` and places the image on the clipboard. The file format is PNG, JPEG, WebP, BMP, GIF, or TIFF. `File format` in the settings selects it. The after-capture switches in the menu turn each task on or off, and the hub remembers them.
 
 ### Settings
 
@@ -237,6 +237,7 @@ Press `S`, or select `Settings`, to change the defaults:
 | Monitor | The monitor under the pointer, or the primary monitor |
 | HDR: SDR white level | A fixed level in nits, or the value from Windows |
 | Start in the tray at sign-in | Adds or removes a sign-in entry for the current user that runs `record screenshot --tray` |
+| File format | PNG, JPEG, WebP, BMP, GIF, or TIFF. `Enter` selects the next one |
 
 The hub stores the settings in `%APPDATA%\record\screenshot-settings.txt`. Direct capture and the tray process use the same values. An option on the command line overrides a stored value for that run.
 
@@ -284,7 +285,8 @@ Modes:
   last     The last region again
 
 Options:
-  -o, --output <FILE>      PNG destination. Omit for a timestamped file
+  -o, --output <FILE>      Image destination. The extension selects the format
+      --format <FORMAT>    png, jpg, webp, bmp, gif, or tiff for timestamped files
       --dir <FOLDER>       Folder for timestamped files
       --monitor <MONITOR>  pointer, primary, or an index number
       --region <REGION>    Capture LEFT,TOP,WIDTH,HEIGHT in desktop pixels
@@ -346,7 +348,7 @@ The status line shows the SDR white level that the conversion used. Use `--sdr-w
 The window opens on **Home**. Home has one large button for each mode, the most recent files, and the state of the global hotkeys. Tabs at the top switch between Home, System audio, Screen capture, and Screenshot.
 
 - **System audio** shows the time, two six-second scopes, the spectrum, and the left and right levels. It writes MP3 files to `Music\record`.
-- **Screen capture** selects the monitor and the frame rate and shows a live picture. It writes MP4 files to `Videos\record`.
+- **Screen capture** selects the monitor and the frame rate. The preview shows the selected monitor live, before and during a recording. It writes MP4 files to `Videos\record`.
 - **Screenshot** has the capture list, the after-capture switches, the upload destination, and the history with a preview. The window minimizes during a capture, so it is never in its own picture.
 
 The window draws its own title bar in place of the Windows frame. Drag it to move the window, and double-click it to maximize. The title bar holds the menus. **File** starts, pauses, and saves a recording and opens Settings. **View** switches screens. **Capture** has every screenshot mode and the upload destination. **Help** lists the keys.
@@ -363,11 +365,34 @@ The window draws its own title bar in place of the Windows frame. Drag it to mov
 | `Ctrl+,` | Settings |
 | `Alt+F`, `Alt+V`, `Alt+C`, `Alt+H` | Open a menu |
 
-The screenshot hotkeys `Ctrl+PrtSc`, `PrtSc`, and `Alt+PrtSc` work in every program while the window is open.
+One audio or video recording runs at a time. The tab of the mode that records shows a red dot, and the other screens stay reachable.
 
-One audio or video recording runs at a time. The tab of the mode that records shows a red dot, and the other screens stay reachable. If you close the window during a recording, the program saves the file first.
+### Tray
+
+The program keeps an icon in the notification area. Windows 11 puts new icons behind the `^` arrow. Drag the icon to the taskbar to keep it visible.
+
+The close button hides the window, and the program stays in the tray. The screenshot hotkeys `Ctrl+PrtSc`, `PrtSc`, and `Alt+PrtSc` work in every program while it runs. A click on the icon opens the window. The menu of the icon captures a region, all screens, or the active window, and `Quit` ends the program. `Close to tray` in Settings turns this off. The close button then ends the program.
+
+A recording that runs when the program quits saves its file first.
+
+Only one copy runs. A second start shows the window of the first copy.
+
+| Argument | Meaning |
+|---|---|
+| `--hidden` | Start in the tray without the window. `Start at sign-in` in Settings uses this. |
+| `--quit` | Ask the running copy to save its work and exit. |
+
+### Update from source
+
+A running program locks its files, so a plain build or copy fails while it runs. This script asks the running copies to exit, builds both programs, installs them to `%LOCALAPPDATA%\Programs\record`, and starts again what ran before:
+
+```powershell
+.\scripts\build-install.ps1
+```
 
 To add a ShareX custom uploader, drop its `.sxcu` file on the window.
+
+To build without the install step:
 
 ```powershell
 cargo build --release -p record-desktop

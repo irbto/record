@@ -10,6 +10,15 @@ This file gives the important project changes. The project uses [Semantic Versio
   screenshots in one window. A home screen selects the mode, tabs switch
   between the screens, and a menu bar holds every command. It is built with
   Tauri and looks like the terminal screens.
+- `record-desktop` stays in the notification area. The close button hides
+  the window, the tray menu captures and quits, and only one copy runs.
+  `--hidden` starts it in the tray, and `--quit` asks the running copy to
+  exit.
+- `scripts/build-install.ps1` builds and installs both programs. It closes
+  the running copies first and starts them again.
+- Screenshots save as PNG, JPEG, WebP, BMP, GIF, or TIFF. The settings and
+  `--format` select the format, and the extension of `--output` selects it
+  for one file.
 - The capture engines are a separate `record-core` crate without a user
   interface.
 

@@ -19,7 +19,7 @@ const app = {
   monitors: [] as Monitor[],
   files: { audio: [], video: [], screenshot: [] } as Record<Mode, FileEntry[]>,
   rec: { mode: null as Recorder | null, phase: "idle" as Phase, facts: "", file: "", seconds: 0, since: 0, banked: 0 },
-  video: { monitor: 0, fps: 60, sequence: 0, picture: null as CanvasImageSource | null, width: 0, height: 0, polling: false },
+  video: { monitor: 0, fps: 60, picture: null as ImageBitmap | null, polling: false, problem: "" },
   shots: { busy: false, picked: 0, bitmap: null as ImageBitmap | null, shown: "" },
   bands: [] as number[],
 };
@@ -151,7 +151,6 @@ async function enter(route: Route): Promise<void> {
 
 function resetRecording(): void {
   app.rec = { mode: null, phase: "idle", facts: "", file: "", seconds: 0, since: 0, banked: 0 };
-  app.video.picture = null;
   app.bands = [];
 }
 
@@ -163,10 +162,7 @@ function elapsed(): number {
 
 async function startRecording(): Promise<void> {
   if (app.rec.phase !== "idle") return;
-  if (app.route !== "audio" && app.route !== "video") {
-    say("Open System audio or Screen capture to start a recording.");
-    return;
-  }
+  if (app.route !== "audio" && app.route !== "video") return;
   const mode = app.route;
   resetRecording();
   app.rec.mode = mode;
@@ -194,7 +190,7 @@ async function togglePause(): Promise<void> {
     if (paused && rec.phase === "rec") rec.banked += (performance.now() - rec.since) / 1000;
     if (!paused) rec.since = performance.now();
     rec.phase = paused ? "paused" : "rec";
-    say(paused ? "Paused. The file stays open." : "");
+    say(paused ? "Paused" : "");
     render();
   } catch (error) {
     fail(error);
@@ -222,7 +218,7 @@ function recordOrPause(): void {
 function onStopped(file: string | null, error: string | null): void {
   const mode = app.rec.mode;
   resetRecording();
-  if (error) say(`The recording failed: ${error}`, "bad");
+  if (error) say(`Recording failed: ${error}`, "bad");
   else if (file) say(`Saved ${file}`, "good");
   render();
   if (mode) void refreshFiles(mode);
@@ -235,7 +231,7 @@ function onSound(update: SoundUpdate): void {
     case "started":
       traces.left.setRate(update.sampleRate);
       traces.right.setRate(update.sampleRate);
-      rec.facts = `MP3, ${Math.round(update.bitrate / 1000)} kbps, ${update.sampleRate / 1000} kHz, stereo`;
+      rec.facts = `MP3 ${Math.round(update.bitrate / 1000)} kbps ${update.sampleRate / 1000} kHz`;
       if (rec.phase === "starting") rec.phase = "rec";
       render();
       break;
@@ -262,7 +258,7 @@ function onVideo(update: VideoUpdate): void {
   const rec = app.rec;
   switch (update.kind) {
     case "started":
-      rec.facts = `${update.width}x${update.height}, ${update.fps} fps, H.264 and AAC`;
+      rec.facts = `${update.width}x${update.height} ${update.fps} fps H.264 AAC`;
       if (rec.phase === "starting") {
         rec.phase = "rec";
         rec.since = performance.now();
@@ -282,22 +278,30 @@ function onVideo(update: VideoUpdate): void {
   }
 }
 
-/** Asks for the newest live picture while a video records on screen. */
+/**
+ * Shows the selected monitor as it looks now. This runs while the screen
+ * capture screen is open, with or without a recording.
+ */
 async function pollPicture(): Promise<void> {
   const video = app.video;
-  if (video.polling || app.rec.mode !== "video" || app.rec.phase !== "rec" || app.route !== "video" || document.hidden) return;
+  const monitor = app.monitors.find((one) => one.index === video.monitor);
+  if (video.polling || !monitor || app.route !== "video" || document.hidden) return;
   video.polling = true;
+  let problem = "";
   try {
-    const frame = await bridge.videoFrame(video.sequence);
-    if (frame && app.rec.mode === "video") {
-      video.sequence = frame.sequence;
-      video.width = frame.width;
-      video.height = frame.height;
-      video.picture = draw.keepFrame(frame);
-      $("desktop-empty").hidden = true;
-    }
-  } catch {
-    // A missed picture is replaced by the next one.
+    const picture = await createImageBitmap(await bridge.monitorPreview(monitor));
+    if (video.monitor === monitor.index) {
+      video.picture?.close();
+      video.picture = picture;
+    } else picture.close();
+  } catch (error) {
+    problem = typeof error === "string" ? error : error instanceof Error ? error.message : String(error);
+  }
+  if (problem !== video.problem) {
+    video.problem = problem;
+    const empty = $("desktop-empty");
+    empty.textContent = problem;
+    empty.hidden = !problem;
   }
   video.polling = false;
 }
@@ -341,7 +345,7 @@ function onShot(update: ShotUpdate): void {
       break;
     case "finished": {
       shots.busy = false;
-      const parts = [update.file ? `Saved ${update.file}` : "Copied to the clipboard", `${update.width}x${update.height}`];
+      const parts = [update.file ? `Saved ${update.file}` : "Copied", `${update.width}x${update.height}`];
       if (update.url) parts.splice(0, 2, `Uploaded ${update.url}`, update.copied ? "link copied" : "");
       else if (update.copied && update.file) parts.push("copied");
       if (update.hdrNits !== null) parts.push(`HDR at ${Math.round(update.hdrNits)} nits`);
@@ -353,11 +357,11 @@ function onShot(update: ShotUpdate): void {
     }
     case "cancelled":
       shots.busy = false;
-      say("Cancelled. No file was written.");
+      say("Cancelled");
       break;
     case "failed":
       shots.busy = false;
-      say(`The capture failed: ${update.error}`, "bad");
+      say(`Capture failed: ${update.error}`, "bad");
       break;
     case "auto":
       if (app.snapshot) app.snapshot.autoActive = update.active;
@@ -442,10 +446,7 @@ function folderOf(route: Route): string {
 }
 
 async function openFolder(): Promise<void> {
-  if (app.route === "home") {
-    say("Open one of the three screens first. Each has its own folder.");
-    return;
-  }
+  if (app.route === "home") return;
   try {
     await bridge.openFolder(app.route);
   } catch (error) {
@@ -487,11 +488,11 @@ function renderTransport(mode: Recorder): void {
   const monitor = app.monitors.find((one) => one.index === app.video.monitor);
   const ready =
     mode === "audio"
-      ? "MP3, 320 kbps, stereo"
+      ? "MP3 320 kbps"
       : monitor
-        ? `${monitor.width}x${monitor.height}, ${app.video.fps} fps, H.264 and AAC`
-        : `${app.video.fps} fps, H.264 and AAC`;
-  const facts = other ? `${modeNames[rec.mode!]} records now. Save it first.` : mine && rec.facts ? rec.facts : ready;
+        ? `${monitor.width}x${monitor.height} ${app.video.fps} fps H.264 AAC`
+        : `${app.video.fps} fps H.264 AAC`;
+  const facts = other ? `${modeNames[rec.mode!]} is recording` : mine && rec.facts ? rec.facts : ready;
   const live = phase === "rec" || phase === "paused";
   const button = (id: string, className: string, label: string, title: string, enabled: boolean, action: () => void) => {
     const element = h("button", { className: `button ${className}`, type: "button", textContent: label, title, disabled: !enabled, dataset: { id } });
@@ -503,9 +504,9 @@ function renderTransport(mode: Recorder): void {
     h("span", { className: "clock", id: `clock-${mode}`, textContent: clock(mine ? elapsed() : 0) }),
     h("span", { className: "facts", textContent: facts }),
     h("span", { className: "spacer" }),
-    button(`record-${mode}`, "go", "● Record", "Start recording (Ctrl+R)", phase === "idle" && !other, () => void startRecording()),
-    button(`pause-${mode}`, "", phase === "paused" ? "Resume" : "Pause", "Pause or resume (Ctrl+P)", live, () => void togglePause()),
-    button(`stop-${mode}`, "save", "■ Save and stop", "Save the file and stop (Ctrl+S)", live || phase === "starting", () => void stopRecording()),
+    button(`record-${mode}`, "go", "● Record", "Ctrl+R", phase === "idle" && !other, () => void startRecording()),
+    button(`pause-${mode}`, "", phase === "paused" ? "Resume" : "Pause", "Ctrl+P", live, () => void togglePause()),
+    button(`stop-${mode}`, "save", "■ Save and stop", "Ctrl+S", live || phase === "starting", () => void stopRecording()),
   );
 }
 
@@ -517,7 +518,7 @@ function fileRows(parent: HTMLElement, mode: Mode, empty: string): void {
       id: `file-${file.path}`,
       name: file.name,
       key: age(file.ageSeconds),
-      title: "Show in the folder",
+      title: "Show in folder",
       action: () => void bridge.reveal(file.path).catch(fail),
     });
   }
@@ -532,15 +533,16 @@ function renderHome(): void {
     .sort((first, second) => first.ageSeconds - second.ageSeconds)
     .slice(0, 30);
   for (const file of all) {
-    row(recent, { id: `recent-${file.path}`, name: file.name, key: age(file.ageSeconds), title: "Open the file", action: () => void bridge.openFile(file.path).catch(fail) });
+    row(recent, { id: `recent-${file.path}`, name: file.name, key: age(file.ageSeconds), title: "Open", action: () => void bridge.openFile(file.path).catch(fail) });
   }
-  if (!all.length) note(recent, "Nothing yet. Recordings and screenshots appear here.");
+  if (!all.length) note(recent, "No files");
+  $("card-format").textContent = app.snapshot?.format ?? "PNG";
 
   const hotkeys = $("hotkeys");
   hotkeys.replaceChildren();
   const snapshot = app.snapshot;
   if (snapshot?.engineError) {
-    note(hotkeys, `The screenshot engine did not start: ${snapshot.engineError}`);
+    note(hotkeys, `Screenshot engine failed: ${snapshot.engineError}`);
     return;
   }
   captures.slice(0, 3).forEach((item, index) => {
@@ -549,16 +551,15 @@ function renderHome(): void {
       id: `hotkey-${item.kind}`,
       name: `${item.key}  ${item.name}`,
       dot: registered,
-      key: registered ? "ready" : "used by another program",
+      key: registered ? "ready" : "in use",
     });
   });
-  note(hotkeys, "They work in every program while this window is open, also when it is minimized.");
 }
 
 function renderAudio(): void {
   renderTransport("audio");
   $("audio-files-title").textContent = `Recordings · ${app.files.audio.length}`;
-  fileRows($("audio-files"), "audio", "No recordings yet. Record saves an MP3 file here.");
+  fileRows($("audio-files"), "audio", "No recordings");
 }
 
 function renderVideo(): void {
@@ -577,11 +578,13 @@ function renderVideo(): void {
       action: () => {
         if (app.rec.phase !== "idle") return;
         video.monitor = monitor.index;
+        video.picture?.close();
+        video.picture = null;
         render();
       },
     });
   }
-  if (!app.monitors.length) note(sources, "Looking for monitors");
+  if (!app.monitors.length) note(sources, "No monitors");
   const settings = $("video-settings");
   settings.replaceChildren();
   row(settings, {
@@ -589,7 +592,6 @@ function renderVideo(): void {
     name: "Frame rate",
     key: `${video.fps} fps`,
     off: !idle,
-    title: "Switch between 30 and 60 frames per second",
     action: () => {
       video.fps = video.fps === 60 ? 30 : 60;
       render();
@@ -599,11 +601,8 @@ function renderVideo(): void {
   row(settings, { id: "audio-codec", name: "Audio", key: "AAC · 192 kbps" });
   $("picture-title").textContent = `Preview · Display ${video.monitor + 1}`;
   $("video-files-title").textContent = `Recordings · ${app.files.video.length}`;
-  fileRows($("video-files"), "video", "No recordings yet. Record saves an MP4 file here.");
-  const empty = $("desktop-empty");
-  const mine = rec.mode === "video";
-  empty.hidden = mine && video.picture !== null;
-  empty.textContent = mine ? (rec.phase === "saving" ? "Saving the file" : "Starting the capture") : "Record starts the capture. The live picture appears here.";
+  fileRows($("video-files"), "video", "No recordings");
+  $("desktop-empty").hidden = !video.problem;
 }
 
 function renderScreenshot(): void {
@@ -625,15 +624,15 @@ function renderScreenshot(): void {
     dot: Boolean(snapshot?.autoActive),
     action: () => void toggleAuto(),
   });
-  if (snapshot?.engineError) note(menu, `The screenshot engine did not start: ${snapshot.engineError}`);
+  if (snapshot?.engineError) note(menu, `Screenshot engine failed: ${snapshot.engineError}`);
 
   const after = $("after-menu");
   after.replaceChildren();
   if (snapshot) {
-    row(after, { id: "flag-copy", name: "Copy to the clipboard", dot: snapshot.copy, action: () => toggleFlag("copy") });
-    row(after, { id: "flag-save", name: "Save a PNG file", dot: snapshot.save, action: () => toggleFlag("save") });
-    row(after, { id: "flag-upload", name: "Upload and copy the link", dot: snapshot.upload, action: () => toggleFlag("upload") });
-    row(after, { id: "destination", name: "Upload destination", key: snapshot.destination ?? "none", title: "Choose where uploads go (Ctrl+D)", action: openDestinations });
+    row(after, { id: "flag-copy", name: "Copy", dot: snapshot.copy, action: () => toggleFlag("copy") });
+    row(after, { id: "flag-save", name: "Save", key: snapshot.format, dot: snapshot.save, action: () => toggleFlag("save") });
+    row(after, { id: "flag-upload", name: "Upload", dot: snapshot.upload, action: () => toggleFlag("upload") });
+    row(after, { id: "destination", name: "Destination", key: snapshot.destination ?? "none", title: "Ctrl+D", action: openDestinations });
   }
 
   const history = $("history");
@@ -650,18 +649,17 @@ function renderScreenshot(): void {
       },
     });
   });
-  if (!app.files.screenshot.length) note(history, "No screenshots in this folder yet.");
   $("history-title").textContent = `History · ${app.files.screenshot.length}`;
   const file = pickedShot();
   $("preview-title").textContent = file?.name ?? "Preview";
-  $("shot-empty").textContent = "Take a screenshot. The newest one appears here.";
+  $("shot-empty").textContent = "No screenshots";
   const action = (id: string, label: string, run: () => void) => {
     const element = h("button", { className: "button", type: "button", textContent: label, disabled: !file, dataset: { id } });
     element.addEventListener("click", run);
     return element;
   };
   $("shot-actions").replaceChildren(
-    action("shot-copy", "Copy image", () => void withShot(bridge.copyPicture, "Copied {} to the clipboard")),
+    action("shot-copy", "Copy image", () => void withShot(bridge.copyPicture, "Copied {}")),
     action("shot-reveal", "Show in folder", () => void withShot(bridge.reveal, "")),
     action("shot-open", "Open", () => void withShot(bridge.openFile, "")),
   );
@@ -714,8 +712,8 @@ function paint(): void {
     draw.meter($("bar-left"), $("db-left"), live ? traces.left.peak(10) : 0);
     draw.meter($("bar-right"), $("db-right"), live ? traces.right.peak(10) : 0);
   } else if (route === "video") {
-    const video = app.video;
-    draw.contain($<HTMLCanvasElement>("desktop"), rec.mode === "video" ? video.picture : null, video.width, video.height);
+    const picture = app.video.picture;
+    draw.contain($<HTMLCanvasElement>("desktop"), picture, picture?.width ?? 0, picture?.height ?? 0);
   }
   if (rec.mode) {
     const text = clock(elapsed());
@@ -752,25 +750,29 @@ function openSettings(): void {
   const snapshot = app.snapshot;
   if (!snapshot) return;
   const problem = h("p", { className: "problem" });
-  const plain: { name: Setting; label: string; hint: string; value: string }[] = [
-    { name: "folder", label: "Screenshot folder", hint: "PNG files go here.", value: snapshot.folder },
-    { name: "delaySeconds", label: "Delay, seconds", hint: "The wait of a delayed capture.", value: number(snapshot.delaySeconds) },
-    { name: "intervalSeconds", label: "Auto capture, seconds", hint: "The time between two auto captures.", value: number(snapshot.intervalSeconds) },
-    { name: "sdrWhiteNits", label: "HDR white level, nits", hint: "Leave it empty to use the value from Windows.", value: snapshot.sdrWhiteNits === null ? "" : number(snapshot.sdrWhiteNits) },
+  const plain: { name: Setting; label: string; value: string; placeholder?: string }[] = [
+    { name: "folder", label: "Screenshot folder", value: snapshot.folder },
+    { name: "delaySeconds", label: "Delay (s)", value: number(snapshot.delaySeconds) },
+    { name: "intervalSeconds", label: "Auto capture (s)", value: number(snapshot.intervalSeconds) },
+    { name: "sdrWhiteNits", label: "HDR white (nits)", value: snapshot.sdrWhiteNits === null ? "" : number(snapshot.sdrWhiteNits), placeholder: "auto" },
   ];
   const fields = plain.map((field) => ({
     ...field,
-    input: h("input", { type: "text", value: field.value, spellcheck: false, id: `setting-${field.name}` }),
+    input: h("input", { type: "text", value: field.value, placeholder: field.placeholder ?? "", spellcheck: false, id: `setting-${field.name}` }),
   }));
+  const format = h("select", { id: "setting-format" }, ...snapshot.formats.map((name) => h("option", { value: name, textContent: name, selected: name === snapshot.format })));
   const save = async () => {
     problem.textContent = "";
-    for (const field of fields) {
-      if (field.input.value.trim() === field.value) continue;
+    const changes: { name: Setting; label: string; value: string; focus: HTMLElement }[] = fields
+      .filter((field) => field.input.value.trim() !== field.value)
+      .map((field) => ({ name: field.name, label: field.label, value: field.input.value, focus: field.input }));
+    if (format.value !== snapshot.format) changes.push({ name: "format", label: "Format", value: format.value, focus: format });
+    for (const one of changes) {
       try {
-        app.snapshot = await bridge.setSetting(field.name, field.input.value);
+        app.snapshot = await bridge.setSetting(one.name, one.value);
       } catch (error) {
-        problem.textContent = `${field.label}: ${String(error)}`;
-        field.input.focus();
+        problem.textContent = `${one.label}: ${String(error)}`;
+        one.focus.focus();
         render();
         return;
       }
@@ -794,20 +796,20 @@ function openSettings(): void {
       drawSwitches();
       render();
     };
-    row(switches, { id: "set-primary", name: "Always capture the primary monitor", dot: current.primaryMonitor, title: "Off captures the monitor under the pointer", action: () => void flip("primaryMonitor")() });
-    row(switches, { id: "set-autostart", name: "Start the screenshot tray at sign-in", dot: current.autostart, title: "Runs record screenshot --tray when you sign in", action: () => void flip("autostart")() });
+    row(switches, { id: "set-primary", name: "Capture primary monitor", dot: current.primaryMonitor, action: () => void flip("primaryMonitor")() });
+    row(switches, { id: "set-tray", name: "Close to tray", dot: current.closeToTray, action: () => void flip("closeToTray")() });
+    row(switches, { id: "set-autostart", name: "Start at sign-in", dot: current.autostart, action: () => void flip("autostart")() });
   };
   drawSwitches();
   openDialog(
     "Settings",
     (body) => {
-      for (const field of fields) {
-        body.append(
-          h("div", { className: "field" }, h("label", { htmlFor: field.input.id, textContent: field.label }), field.input, h("small", { textContent: field.hint })),
-        );
-      }
+      const [folder, ...rest] = fields;
+      const line = (label: string, control: HTMLElement) => h("div", { className: "field" }, h("label", { htmlFor: control.id, textContent: label }), control);
+      if (folder) body.append(line(folder.label, folder.input));
+      body.append(line("Format", format));
+      for (const field of rest) body.append(line(field.label, field.input));
       body.append(switches);
-      body.append(h("p", { className: "hint", textContent: `Audio goes to ${snapshot.audioFolder}. Video goes to ${snapshot.videoFolder}.` }));
       const saveButton = h("button", { className: "button save", type: "submit", textContent: "Save" });
       body.append(problem, h("div", { className: "buttons" }, closeButton("Cancel"), saveButton));
     },
@@ -828,12 +830,12 @@ function openDestinations(): void {
       problem.textContent = String(error);
     }
   };
-  const uploadsTo = (snapshot: Snapshot) => `Uploads go to ${snapshot.destination ?? "the new destination"}`;
+  const uploadsTo = (snapshot: Snapshot) => `Destination: ${snapshot.destination ?? ""}`;
   const build = (body: HTMLElement) => {
     const snapshot = app.snapshot;
     if (!snapshot) return;
     const list = h("div", { className: "rows" });
-    row(list, { id: "dest-off", name: "Off", key: "no upload", selected: !snapshot.upload, action: () => void apply(bridge.selectDestination(null), () => "Uploads are off") });
+    row(list, { id: "dest-off", name: "Off", key: "no upload", selected: !snapshot.upload, action: () => void apply(bridge.selectDestination(null), () => "Upload off") });
     let submit: (() => void) | null = null;
     for (const destination of snapshot.destinations) {
       row(list, {
@@ -856,17 +858,16 @@ function openDestinations(): void {
         const save = h("button", { className: "button save", type: "button", textContent: "Save and use" });
         save.addEventListener("click", send);
         submit = send;
-        list.append(h("div", { className: "note" }, h("div", { className: "inline" }, input, save), h("p", { textContent: `Get the ${destination.keyLabel} at ${destination.keySource}. It stays on this PC.` })));
+        list.append(h("div", { className: "note" }, h("div", { className: "inline" }, input, save), h("p", { textContent: destination.keySource })));
       }
     }
-    const path = h("input", { type: "text", id: "dest-import", spellcheck: false, placeholder: "C:\\path\\to\\uploader.sxcu" });
+    const path = h("input", { type: "text", id: "dest-import", spellcheck: false, placeholder: ".sxcu path" });
     const importIt = () => void apply(bridge.importUploader(path.value), uploadsTo);
     const importButton = h("button", { className: "button", type: "button", textContent: "Import" });
     importButton.addEventListener("click", importIt);
     onSubmit = () => (document.activeElement === path ? importIt() : submit?.());
     body.append(
       list,
-      h("p", { className: "hint", textContent: "Any ShareX custom uploader works. Enter the path of a .sxcu file, or drop the file on this window." }),
       h("div", { className: "inline" }, path, importButton),
       problem,
       h("div", { className: "buttons" }, closeButton()),
@@ -877,21 +878,21 @@ function openDestinations(): void {
 
 function openShortcuts(): void {
   const groups: [string, [string, string][]][] = [
-    ["In this window", [
+    ["Window", [
       ["Ctrl+0 to Ctrl+3", "Home, System audio, Screen capture, Screenshot"],
-      ["Ctrl+R", "Start recording"],
-      ["Space", "Start, pause, or resume"],
-      ["Ctrl+P", "Pause or resume"],
+      ["Ctrl+R", "Record"],
+      ["Space", "Record, pause, resume"],
+      ["Ctrl+P", "Pause, resume"],
       ["Ctrl+S", "Save and stop"],
-      ["Ctrl+O", "Open the output folder"],
-      ["Ctrl+D", "Upload destination"],
+      ["Ctrl+O", "Open folder"],
+      ["Ctrl+D", "Destination"],
       ["Ctrl+,", "Settings"],
-      ["Alt+F, V, C, H", "Open a menu"],
+      ["Alt+F, V, C, H", "Menus"],
     ]],
-    ["In every program", [
-      ["Ctrl+PrtSc", "Capture a region"],
-      ["PrtSc", "Capture all screens"],
-      ["Alt+PrtSc", "Capture the active window"],
+    ["Global", [
+      ["Ctrl+PrtSc", "Region"],
+      ["PrtSc", "Fullscreen"],
+      ["Alt+PrtSc", "Active window"],
     ]],
   ];
   openDialog("Keyboard shortcuts", (body) => {
@@ -908,7 +909,7 @@ function openAbout(): void {
   openDialog("About record", (body) => {
     body.append(
       h("p", { textContent: `record ${app.snapshot?.version ?? ""}` }),
-      h("p", { className: "hint", textContent: "System audio to MP3, the screen to MP4, and screenshots that stay correct on HDR monitors. One small program, MIT license." }),
+      h("p", { className: "hint", textContent: "MIT" }),
       h("p", { className: "hint", textContent: "github.com/irbto/record" }),
       h("div", { className: "buttons" }, closeButton()),
     );
@@ -930,15 +931,16 @@ function menuEntries(menu: string): MenuEntry[] {
   switch (menu) {
     case "File":
       return [
-        { label: "Start recording", key: "Ctrl+R", enabled: rec.phase === "idle" && onRecorder, run: () => void startRecording() },
+        { label: "Record", key: "Ctrl+R", enabled: rec.phase === "idle" && onRecorder, run: () => void startRecording() },
         { label: rec.phase === "paused" ? "Resume" : "Pause", key: "Ctrl+P", enabled: live, run: () => void togglePause() },
         { label: "Save and stop", key: "Ctrl+S", enabled: live || rec.phase === "starting", run: () => void stopRecording() },
         "separator",
-        { label: "Open the output folder", key: "Ctrl+O", enabled: app.route !== "home", run: () => void openFolder() },
+        { label: "Open folder", key: "Ctrl+O", enabled: app.route !== "home", run: () => void openFolder() },
         "separator",
         { label: "Settings", key: "Ctrl+,", run: openSettings },
         "separator",
-        { label: "Exit", key: "Alt+F4", run: () => void bridge.quit() },
+        { label: "Close window", key: "Alt+F4", run: () => void bridge.closeWindow().catch(fail) },
+        { label: "Quit", run: () => void bridge.quit().catch(fail) },
       ];
     case "View":
       return [
@@ -957,10 +959,10 @@ function menuEntries(menu: string): MenuEntry[] {
         "separator",
         { label: "Auto capture", checked: Boolean(snapshot?.autoActive), enabled: !snapshot?.engineError, run: () => void toggleAuto() },
         "separator",
-        { label: "Copy to the clipboard", checked: Boolean(snapshot?.copy), run: () => toggleFlag("copy") },
-        { label: "Save a PNG file", checked: Boolean(snapshot?.save), run: () => toggleFlag("save") },
-        { label: "Upload and copy the link", checked: Boolean(snapshot?.upload), run: () => toggleFlag("upload") },
-        { label: "Upload destination", key: "Ctrl+D", run: openDestinations },
+        { label: "Copy", checked: Boolean(snapshot?.copy), run: () => toggleFlag("copy") },
+        { label: "Save", checked: Boolean(snapshot?.save), run: () => toggleFlag("save") },
+        { label: "Upload", checked: Boolean(snapshot?.upload), run: () => toggleFlag("upload") },
+        { label: "Destination", key: "Ctrl+D", run: openDestinations },
       ];
     }
     default:
@@ -1044,7 +1046,7 @@ async function start(): Promise<void> {
   };
   $("win-min").addEventListener("click", () => void bridge.minimize().catch(fail));
   $("win-max").addEventListener("click", () => void bridge.toggleMaximize().then(showMaximized, fail));
-  $("win-close").addEventListener("click", () => void bridge.quit().catch(fail));
+  $("win-close").addEventListener("click", () => void bridge.closeWindow().catch(fail));
   window.addEventListener("hashchange", () => void enter(readRoute()));
   window.addEventListener("resize", () => {
     // A double-click on the title bar or a snap also changes this state.
@@ -1056,17 +1058,14 @@ async function start(): Promise<void> {
   bridge.on("sound", onSound);
   bridge.on("video", onVideo);
   bridge.on("shots", onShot);
-  bridge.on("closing", () => say("Saving the recording. The window closes when the file is ready."));
+  bridge.on("closing", () => say("Saving recording"));
   bridge.on("drop", (paths) => {
     const uploader = paths.find((path) => path.toLowerCase().endsWith(".sxcu"));
-    if (!uploader) {
-      say("Drop a .sxcu file to add an upload destination.");
-      return;
-    }
+    if (!uploader) return;
     void change(bridge.importUploader(uploader)).then((done) => {
       if (!done) return;
       if (dialog.open) dialog.close();
-      say(`Uploads go to ${app.snapshot?.destination ?? "the new destination"}`, "good");
+      say(`Destination: ${app.snapshot?.destination ?? ""}`, "good");
     });
   });
 
@@ -1075,11 +1074,11 @@ async function start(): Promise<void> {
   } catch (error) {
     fail(error);
   }
-  window.setInterval(() => void pollPicture(), 125);
+  window.setInterval(() => void pollPicture(), 150);
   requestAnimationFrame(paint);
   await enter(readRoute());
   if (bridge.demo) {
-    say("Preview with a simulated signal. Nothing is recorded.");
+    say("Demo");
     if (location.search.includes("rec")) await startRecording();
   }
 }

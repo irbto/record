@@ -9,7 +9,10 @@ use std::{
     process::Command,
 };
 
-use super::upload::{settings_directory, write_setting};
+use super::{
+    format::ImageFormat,
+    upload::{settings_directory, write_setting},
+};
 
 /// Name of the settings file.
 const FILE: &str = "screenshot-settings.txt";
@@ -29,6 +32,8 @@ pub struct SavedSettings {
     pub upload: bool,
     /// Folder for screenshots. `None` selects `Pictures\Screenshots`.
     pub folder: Option<PathBuf>,
+    /// File format of saved screenshots.
+    pub format: ImageFormat,
     /// Seconds that the delayed captures wait.
     pub delay_seconds: f32,
     /// Seconds between auto captures.
@@ -46,6 +51,7 @@ impl Default for SavedSettings {
             save: true,
             upload: false,
             folder: None,
+            format: ImageFormat::Png,
             delay_seconds: 3.0,
             interval_seconds: 5.0,
             primary_monitor: false,
@@ -91,6 +97,9 @@ impl SavedSettings {
                 ("upload", Some(flag)) => settings.upload = flag,
                 ("primary_monitor", Some(flag)) => settings.primary_monitor = flag,
                 ("folder", _) if !value.is_empty() => settings.folder = Some(value.into()),
+                ("format", _) => {
+                    settings.format = ImageFormat::parse(value).unwrap_or(settings.format);
+                }
                 ("delay", _) => {
                     settings.delay_seconds = parse_seconds(value).unwrap_or(settings.delay_seconds);
                 }
@@ -123,11 +132,12 @@ impl SavedSettings {
             .map(|nits| nits.to_string())
             .unwrap_or_default();
         format!(
-            "copy={}\nsave={}\nupload={}\nfolder={folder}\ndelay={}\ninterval={}\n\
+            "copy={}\nsave={}\nupload={}\nfolder={folder}\nformat={}\ndelay={}\ninterval={}\n\
              primary_monitor={}\nsdr_white={sdr_white}\n",
             self.copy,
             self.save,
             self.upload,
+            self.format.extension(),
             self.delay_seconds,
             self.interval_seconds,
             self.primary_monitor,
@@ -203,12 +213,27 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
     if !cfg!(windows) {
         return Err("starting at sign-in is available on Windows only".to_owned());
     }
-    let mut command = registry_tool();
-    if enabled {
+    let line = if enabled {
         let current = std::env::current_exe()
             .map_err(|error| format!("could not find the record executable: {error}"))?;
         let program = tray_program(&current)?;
-        let line = format!("\"{}\" screenshot --tray", program.display());
+        Some(format!("\"{}\" screenshot --tray", program.display()))
+    } else {
+        None
+    };
+    set_autostart_line(line.as_deref())
+}
+
+/// Sets or removes the command line that Windows runs at sign-in.
+///
+/// The desktop program uses this to start itself in the tray. Both programs
+/// share one entry, because only one of them can own the hotkeys.
+pub fn set_autostart_line(line: Option<&str>) -> Result<(), String> {
+    if !cfg!(windows) {
+        return Err("starting at sign-in is available on Windows only".to_owned());
+    }
+    let mut command = registry_tool();
+    if let Some(line) = line {
         command.args([
             "add",
             AUTOSTART_KEY,
@@ -243,6 +268,7 @@ mod tests {
             save: true,
             upload: true,
             folder: Some(PathBuf::from(r"D:\Shots = here")),
+            format: ImageFormat::Webp,
             delay_seconds: 1.5,
             interval_seconds: 30.0,
             primary_monitor: true,
@@ -258,7 +284,7 @@ mod tests {
     #[test]
     fn bad_lines_keep_the_defaults_and_one_output_stays_on() {
         let settings = SavedSettings::parse(
-            "copy=false\nsave=false\ndelay=never\ninterval=0\nsdr_white=5\nnoise\nupload = true",
+            "copy=false\nsave=false\ndelay=never\ninterval=0\nsdr_white=5\nnoise\nformat=heic\nupload = true",
         );
         assert_eq!(
             settings,

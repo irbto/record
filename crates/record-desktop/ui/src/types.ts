@@ -40,6 +40,8 @@ export interface Monitor {
   width: number;
   height: number;
   primary: boolean;
+  left: number;
+  top: number;
 }
 
 export interface FileEntry {
@@ -63,6 +65,9 @@ export interface Snapshot {
   destination: string | null;
   destinations: Destination[];
   folder: string;
+  format: string;
+  formats: string[];
+  closeToTray: boolean;
   audioFolder: string;
   videoFolder: string;
   delaySeconds: number;
@@ -76,16 +81,8 @@ export interface Snapshot {
   version: string;
 }
 
-export type Flag = "copy" | "save" | "upload" | "primaryMonitor" | "autostart";
-export type Setting = "folder" | "delaySeconds" | "intervalSeconds" | "sdrWhiteNits";
-
-/** One live picture of a video recording. */
-export interface Frame {
-  sequence: number;
-  width: number;
-  height: number;
-  rgba: Uint8ClampedArray;
-}
+export type Flag = "copy" | "save" | "upload" | "primaryMonitor" | "autostart" | "closeToTray";
+export type Setting = "folder" | "format" | "delaySeconds" | "intervalSeconds" | "sdrWhiteNits";
 
 export interface Events {
   sound: SoundUpdate;
@@ -111,7 +108,8 @@ export interface Bridge {
   startRecording(mode: Mode, monitor: number, fps: number): Promise<string>;
   stopRecording(): Promise<void>;
   setPaused(paused: boolean): Promise<boolean>;
-  videoFrame(after: number): Promise<Frame | null>;
+  /** A small picture of one monitor as it looks now. */
+  monitorPreview(monitor: Monitor): Promise<Blob>;
   files(mode: Mode): Promise<FileEntry[]>;
   /** The bytes of one screenshot, or `null` when a stand-in is drawn. */
   picture(path: string): Promise<Blob | null>;
@@ -119,7 +117,10 @@ export interface Bridge {
   openFile(path: string): Promise<void>;
   openFolder(mode: Mode): Promise<void>;
   copyPicture(path: string): Promise<void>;
+  /** Ends the program. */
   quit(): Promise<void>;
+  /** Closes the window as the close button does: to the tray, or for good. */
+  closeWindow(): Promise<void>;
   minimize(): Promise<void>;
   /** Maximizes or restores the window and returns the new state. */
   toggleMaximize(): Promise<boolean>;

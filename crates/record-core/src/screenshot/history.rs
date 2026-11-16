@@ -12,7 +12,7 @@ const HISTORY_LIMIT: usize = 500;
 /// One saved screenshot file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HistoryEntry {
-    /// Full path of the PNG file.
+    /// Full path of the image file.
     pub path: PathBuf,
     /// File name without its directory.
     pub name: String,
@@ -20,7 +20,7 @@ pub struct HistoryEntry {
     pub modified: SystemTime,
 }
 
-/// Lists the PNG files of a directory, newest first.
+/// Lists the image files of a directory, newest first.
 ///
 /// A missing or unreadable directory gives an empty list.
 #[must_use]
@@ -32,9 +32,7 @@ pub fn list_history(directory: &Path) -> Vec<HistoryEntry> {
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let path = entry.path();
-            let is_png = path
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("png"));
+            let is_png = super::format::is_image_file(&path);
             let metadata = entry.metadata().ok()?;
             (is_png && metadata.is_file()).then(|| HistoryEntry {
                 name: entry.file_name().to_string_lossy().into_owned(),

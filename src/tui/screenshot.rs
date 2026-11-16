@@ -135,16 +135,18 @@ enum Setting {
     Monitor,
     SdrWhite,
     Autostart,
+    Format,
 }
 
 /// The settings menu in display order.
-const SETTINGS: [Setting; 6] = [
+const SETTINGS: [Setting; 7] = [
     Setting::Folder,
     Setting::Delay,
     Setting::Interval,
     Setting::Monitor,
     Setting::SdrWhite,
     Setting::Autostart,
+    Setting::Format,
 ];
 
 /// One row of the destination list.
@@ -505,6 +507,9 @@ impl<H: CaptureHub> App<H> {
                 };
                 self.update_options(|options| options.monitor = monitor);
             }
+            Setting::Format => {
+                self.update_options(|options| options.format = options.format.next());
+            }
             Setting::Autostart => match set_autostart(!self.autostart) {
                 Ok(()) => {
                     self.autostart = !self.autostart;
@@ -611,6 +616,7 @@ impl<H: CaptureHub> App<H> {
             save: self.settings.save.load(Ordering::Relaxed),
             upload: self.settings.upload.load(Ordering::Relaxed),
             folder: Some(options.directory),
+            format: options.format,
             delay_seconds: options.delay.as_secs_f32(),
             interval_seconds: options.auto_interval.as_secs_f32(),
             primary_monitor: options.monitor == MonitorChoice::Primary,
@@ -1110,6 +1116,7 @@ impl<H: CaptureHub> App<H> {
                         String::new(),
                         Some(self.autostart),
                     ),
+                    Setting::Format => ("File format", options.format.name().to_owned(), None),
                 };
                 menu_line(
                     label,
@@ -1318,7 +1325,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
-    use record_core::screenshot::{ScreenshotSummary, upload::Uploader};
+    use record_core::screenshot::{ScreenshotSummary, format::ImageFormat, upload::Uploader};
 
     /// Records requests in place of the capture thread.
     struct FakeHub {
@@ -1343,6 +1350,7 @@ mod tests {
         let settings = Arc::new(HubSettings {
             options: Mutex::new(CaptureOptions {
                 directory: folder.path().to_path_buf(),
+                format: ImageFormat::Png,
                 monitor: MonitorChoice::Pointer,
                 sdr_white_nits: None,
                 auto_interval: Duration::from_secs(5),

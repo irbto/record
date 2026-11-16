@@ -9,7 +9,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -20,7 +20,7 @@ use record_core::{
     audio::{self, AudioEvent, RecordConfig},
     session::OutputTarget,
     spectrum::Spectrum,
-    video::{self, CropRect, FitMode, VideoConfig, VideoEvent, VideoSource, preview::PreviewFrame},
+    video::{self, CropRect, FitMode, VideoConfig, VideoEvent, VideoSource},
 };
 
 use crate::payload::{Mode, SoundUpdate, VideoUpdate, extent, file_name, spectrum_bands};
@@ -43,19 +43,6 @@ pub struct Control {
     pub stop: Arc<AtomicBool>,
     /// Holds the recording without closing the file.
     pub paused: Arc<AtomicBool>,
-}
-
-/// The newest live picture of a video recording.
-#[derive(Debug, Default)]
-pub struct Picture {
-    /// Counts pictures, so the interface can skip one it already has.
-    pub sequence: u32,
-    /// Width in pixels.
-    pub width: u32,
-    /// Height in pixels.
-    pub height: u32,
-    /// Packed RGBA bytes in top-down rows.
-    pub rgba: Vec<u8>,
 }
 
 /// Receives the updates of one recording.
@@ -180,13 +167,12 @@ pub fn start_sound(output: PathBuf, control: &Control, report: Report<SoundUpdat
 
 /// Starts a video recording of one monitor on a new thread.
 ///
-/// Live pictures go to `picture`. The last update is always `Stopped`.
+/// The last update is always `Stopped`.
 pub fn start_video(
     output: PathBuf,
     monitor: u32,
     fps: u32,
     control: &Control,
-    picture: Arc<Mutex<Picture>>,
     report: Report<VideoUpdate>,
 ) {
     let control = control.clone();
@@ -196,8 +182,6 @@ pub fn start_video(
         .spawn(move || {
             let report = worker;
             let (events, event_receiver) = unbounded::<VideoEvent>();
-            // A full preview channel makes the engine skip a picture.
-            let (previews, preview_receiver) = bounded::<PreviewFrame>(2);
             let translated = Arc::clone(&report);
             let translator = thread::spawn(move || {
                 for event in event_receiver {
@@ -210,21 +194,6 @@ pub fn start_video(
                         VideoEvent::Saved(_) => continue,
                     };
                     translated(update);
-                }
-            });
-            let painter = thread::spawn(move || {
-                for frame in preview_receiver {
-                    let mut rgba = frame.bgra;
-                    for pixel in rgba.chunks_exact_mut(4) {
-                        pixel.swap(0, 2);
-                        pixel[3] = 255;
-                    }
-                    if let Ok(mut picture) = picture.lock() {
-                        picture.sequence = picture.sequence.wrapping_add(1).max(1);
-                        picture.width = frame.width;
-                        picture.height = frame.height;
-                        picture.rgba = rgba;
-                    }
                 }
             });
             let result = prepare(&output).and_then(|()| {
@@ -243,14 +212,14 @@ pub fn start_video(
                     stop: control.stop,
                     paused: control.paused,
                 };
-                video::record_video(config, &events, Some(&previews))
+                // The interface draws its own preview of the monitor, so the
+                // recorder sends none.
+                video::record_video(config, &events, None)
                     .map(|summary| summary.output)
                     .map_err(|error| format!("{error:#}"))
             });
             drop(events);
-            drop(previews);
             let _ = translator.join();
-            let _ = painter.join();
             let (file, error) = outcome(result);
             report(VideoUpdate::Stopped { file, error });
         });

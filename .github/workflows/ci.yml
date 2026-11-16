@@ -49,6 +49,7 @@ jobs:
           $errors = @()
           [Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$null, [ref]$errors) | Out-Null
           [Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/benchmark-startup.ps1", [ref]$null, [ref]$errors) | Out-Null
+          [Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/build-install.ps1", [ref]$null, [ref]$errors) | Out-Null
           if ($errors.Count) { throw ($errors | Out-String) }
       - name: Release build
         run: cargo build --release

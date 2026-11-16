@@ -25,7 +25,8 @@ serde = { version = "1", features = ["derive"] }
 # `custom-protocol` selects the production mode: the window always shows the
 # interface that is embedded in the executable. The Tauri command line tool
 # sets this feature itself, and this project builds with plain Cargo.
-tauri = { version = "2", features = ["custom-protocol"] }
+tauri = { version = "2", features = ["custom-protocol", "tray-icon"] }
+tauri-plugin-single-instance = "2"
 
 [dev-dependencies]
 serde_json = "1"

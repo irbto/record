@@ -10,7 +10,10 @@ use std::{path::PathBuf, time::Duration};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::{screenshot::DesktopRect, session::DEFAULT_SEGMENT_DURATION};
+use crate::{
+    screenshot::{DesktopRect, format::ImageFormat},
+    session::DEFAULT_SEGMENT_DURATION,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 /// Selects what `record screenshot` captures without the hub.
@@ -176,9 +179,15 @@ pub enum Command {
         #[arg(value_enum)]
         mode: Option<ScreenshotMode>,
 
-        /// PNG destination. Omit this option to create a timestamped file.
+        /// Image destination. Its extension selects the format. Omit this
+        /// option to create a timestamped file.
         #[arg(short, long, value_name = "FILE")]
         output: Option<PathBuf>,
+
+        /// File format of timestamped files: png, jpg, webp, bmp, gif, or
+        /// tiff. The default is the stored format.
+        #[arg(long, value_name = "FORMAT", value_parser = parse_format)]
+        format: Option<ImageFormat>,
 
         /// Folder for timestamped files. The default is the stored folder or
         /// Pictures\Screenshots.
@@ -228,6 +237,11 @@ pub enum Command {
         #[arg(long)]
         tray: bool,
     },
+}
+
+/// Parses a screenshot file format.
+fn parse_format(value: &str) -> Result<ImageFormat, String> {
+    ImageFormat::parse(value).ok_or_else(|| "use png, jpg, webp, bmp, gif, or tiff".to_owned())
 }
 
 /// Parses a duration in seconds.
