@@ -225,9 +225,24 @@ HDR displays are captured and encoded as SDR. The DXGI desktop duplication API r
 
 Each capture writes a PNG to `Pictures\Screenshots` and places the image on the clipboard. The after-capture switches in the menu turn each task on or off, and the hub remembers them.
 
+### Settings
+
+Press `S`, or select `Settings`, to change the defaults:
+
+| Setting | Meaning |
+|---|---|
+| Screenshots folder | Folder for new screenshots and for the history |
+| Delay of delayed captures | Seconds that `Region in N seconds` and the menu entry `Active window` wait |
+| Auto capture interval | Seconds between two auto captures |
+| Monitor | The monitor under the pointer, or the primary monitor |
+| HDR: SDR white level | A fixed level in nits, or the value from Windows |
+| Start in the tray at sign-in | Adds or removes a sign-in entry for the current user that runs `record screenshot --tray` |
+
+The hub stores the settings in `%APPDATA%\record\screenshot-settings.txt`. Direct capture and the tray process use the same values. An option on the command line overrides a stored value for that run.
+
 ### Region overlay
 
-A region capture copies the monitor under the mouse pointer from the GPU and freezes it in a borderless window on that monitor. A toolbar floats on the frozen picture. Drag to select the region to keep, draw on the picture, and press `Enter`. The overlay is a native window, because a terminal cannot draw over the desktop. The toolbar and the dimmed area outside the selection are never part of the image.
+A region capture copies the monitor under the mouse pointer from the GPU and freezes it in a borderless window on that monitor. A toolbar of icons floats on the frozen picture. Rest the pointer on an icon to see its name and its key. Drag to select the region to keep, draw on the picture, and press `Enter`. The overlay is a native window, because a terminal cannot draw over the desktop. The toolbar and the dimmed area outside the selection are never part of the image.
 
 | Key | Tool or action |
 |---|---|
@@ -271,7 +286,7 @@ Modes:
 Options:
   -o, --output <FILE>      PNG destination. Omit for a timestamped file
       --dir <FOLDER>       Folder for timestamped files
-      --monitor <MONITOR>  pointer, primary, or an index number [default: pointer]
+      --monitor <MONITOR>  pointer, primary, or an index number
       --region <REGION>    Capture LEFT,TOP,WIDTH,HEIGHT in desktop pixels
   -d, --delay <SECONDS>    Wait before the capture
       --every <SECONDS>    Auto capture: repeat at this interval
@@ -295,7 +310,9 @@ record screenshot --region 0,0,1280,720 --every 10
 
 The hub sets up uploads. Press `P`, or select `Destination`, to open the destination list:
 
-- **Imgur** asks for an Imgur API client ID the first time and stores it.
+- **Imgur** and **ImgBB** ask for their API key the first time and store it. Press `K` on the row to change the key later.
+- **Catbox** needs no account.
+- **Litterbox** needs no account and deletes each file after 72 hours.
 - **Import a .sxcu file** asks for the path of a ShareX custom uploader file and copies it into `%APPDATA%\record\uploaders`.
 - Each imported file appears in the list by its name.
 - **Off** keeps images on this computer.
@@ -310,7 +327,7 @@ Direct capture uploads only with `--upload`:
 
 ```powershell
 record screenshot full --upload
-record screenshot full --upload imgur
+record screenshot full --upload catbox
 record screenshot region --upload C:\configs\zipline.sxcu
 ```
 

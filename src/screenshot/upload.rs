@@ -385,6 +385,110 @@ fn pairs(document: &Json, name: &str) -> Vec<(String, String)> {
     }
 }
 
+/// Describes one built-in upload destination.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Preset {
+    /// Identifier for the command line and the settings files.
+    pub id: &'static str,
+    /// Name shown in the hub.
+    pub name: &'static str,
+    /// What the destination calls its key. `None` when it needs no key.
+    pub key_label: Option<&'static str>,
+    /// Where the user gets the key.
+    pub key_source: &'static str,
+    /// One short fact for the destination list.
+    pub note: &'static str,
+}
+
+/// Every built-in destination in list order.
+pub const PRESETS: [Preset; 4] = [
+    Preset {
+        id: "imgur",
+        name: "Imgur",
+        key_label: Some("client ID"),
+        key_source: "api.imgur.com/oauth2/addclient",
+        note: "needs a client ID",
+    },
+    Preset {
+        id: "imgbb",
+        name: "ImgBB",
+        key_label: Some("API key"),
+        key_source: "api.imgbb.com",
+        note: "needs an API key",
+    },
+    Preset {
+        id: "catbox",
+        name: "Catbox",
+        key_label: None,
+        key_source: "",
+        note: "no account",
+    },
+    Preset {
+        id: "litterbox",
+        name: "Litterbox",
+        key_label: None,
+        key_source: "",
+        note: "no account, deleted after 72 hours",
+    },
+];
+
+impl Preset {
+    /// Finds a built-in destination by its identifier, without regard to case.
+    #[must_use]
+    pub fn find(id: &str) -> Option<&'static Self> {
+        PRESETS
+            .iter()
+            .find(|preset| preset.id.eq_ignore_ascii_case(id))
+    }
+
+    /// Returns the stored key of this destination.
+    #[must_use]
+    pub fn key(&self) -> Option<String> {
+        let variable = format!("RECORD_{}_KEY", self.id.to_ascii_uppercase());
+        let mut sources = vec![
+            env::var(variable).ok(),
+            settings_directory()
+                .and_then(|directory| fs::read_to_string(directory.join(self.key_file())).ok()),
+        ];
+        if self.id == "imgur" {
+            // Earlier versions stored the Imgur client ID under these names.
+            sources.push(env::var("RECORD_IMGUR_CLIENT_ID").ok());
+            sources.push(settings_directory().and_then(|directory| {
+                fs::read_to_string(directory.join("imgur-client-id.txt")).ok()
+            }));
+        }
+        sources
+            .into_iter()
+            .flatten()
+            .map(|key| key.trim().to_owned())
+            .find(|key| !key.is_empty())
+    }
+
+    /// Reports whether the destination can upload now.
+    #[must_use]
+    pub fn ready(&self) -> bool {
+        self.key_label.is_none() || self.key().is_some()
+    }
+
+    /// Stores the key of this destination for later runs.
+    pub fn save_key(&self, key: &str) -> Result<(), String> {
+        let key = key.trim();
+        if !valid_key(key) {
+            return Err(format!(
+                "the {} {} has 6 to 128 letters, digits, and dashes",
+                self.name,
+                self.key_label.unwrap_or("key")
+            ));
+        }
+        write_setting(&self.key_file(), key)
+    }
+
+    /// Returns the name of the settings file that holds the key.
+    fn key_file(&self) -> String {
+        format!("{}-key.txt", self.id)
+    }
+}
+
 impl Uploader {
     /// Reads a ShareX custom uploader file.
     ///
@@ -441,25 +545,67 @@ impl Uploader {
         })
     }
 
+    /// Returns a built-in destination by its identifier.
+    ///
+    /// `key` is the API key of a destination that needs one.
+    #[must_use]
+    pub fn preset(id: &str, key: &str) -> Option<Self> {
+        let preset = Preset::find(id)?;
+        let key = key.trim();
+        let pair = |name: &str, value: &str| (name.to_owned(), value.to_owned());
+        let mut uploader = Self {
+            name: preset.name.to_owned(),
+            method: "POST".to_owned(),
+            request_url: String::new(),
+            parameters: Vec::new(),
+            headers: Vec::new(),
+            body: BodyKind::Multipart,
+            arguments: Vec::new(),
+            file_form_name: "file".to_owned(),
+            url: String::new(),
+            deletion_url: String::new(),
+            error_message: String::new(),
+        };
+        match preset.id {
+            "imgur" => {
+                uploader.request_url = "https://api.imgur.com/3/image".to_owned();
+                uploader.headers = vec![pair("Authorization", &format!("Client-ID {key}"))];
+                uploader.file_form_name = "image".to_owned();
+                uploader.url = "{json:data.link}".to_owned();
+                uploader.deletion_url =
+                    "https://imgur.com/delete/{json:data.deletehash}".to_owned();
+                uploader.error_message = "{json:data.error}".to_owned();
+            }
+            "imgbb" => {
+                uploader.request_url = "https://api.imgbb.com/1/upload".to_owned();
+                uploader.parameters = vec![pair("key", key)];
+                uploader.file_form_name = "image".to_owned();
+                uploader.url = "{json:data.url}".to_owned();
+                uploader.deletion_url = "{json:data.delete_url}".to_owned();
+                uploader.error_message = "{json:error.message}".to_owned();
+            }
+            "catbox" => {
+                uploader.request_url = "https://catbox.moe/user/api.php".to_owned();
+                uploader.arguments = vec![pair("reqtype", "fileupload")];
+                uploader.file_form_name = "fileToUpload".to_owned();
+                uploader.error_message = "{response}".to_owned();
+            }
+            "litterbox" => {
+                uploader.request_url =
+                    "https://litterbox.catbox.moe/resources/internals/api.php".to_owned();
+                uploader.arguments = vec![pair("reqtype", "fileupload"), pair("time", "72h")];
+                uploader.file_form_name = "fileToUpload".to_owned();
+                uploader.error_message = "{response}".to_owned();
+            }
+            _ => return None,
+        }
+        Some(uploader)
+    }
+
     /// Returns the built-in Imgur destination for an Imgur API client ID.
     #[must_use]
     pub fn imgur(client_id: &str) -> Self {
-        Self {
-            name: "Imgur".to_owned(),
-            method: "POST".to_owned(),
-            request_url: "https://api.imgur.com/3/image".to_owned(),
-            parameters: Vec::new(),
-            headers: vec![(
-                "Authorization".to_owned(),
-                format!("Client-ID {}", client_id.trim()),
-            )],
-            body: BodyKind::Multipart,
-            arguments: Vec::new(),
-            file_form_name: "image".to_owned(),
-            url: "{json:data.link}".to_owned(),
-            deletion_url: "https://imgur.com/delete/{json:data.deletehash}".to_owned(),
-            error_message: "{json:data.error}".to_owned(),
-        }
+        Self::preset("imgur", client_id).unwrap_or_else(|| unreachable!("imgur is a preset"))
     }
 
     /// Builds the HTTP request that uploads one PNG file.
@@ -623,8 +769,8 @@ impl ResponseContext<'_> {
     }
 }
 
-/// Returns the folder that holds the upload settings of the user.
-fn settings_directory() -> Option<PathBuf> {
+/// Returns the folder that holds the settings of the user.
+pub(crate) fn settings_directory() -> Option<PathBuf> {
     env::var_os("APPDATA").map(|data| PathBuf::from(data).join("record"))
 }
 
@@ -642,32 +788,16 @@ pub fn default_destination() -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
-/// Returns the stored Imgur API client ID.
-#[must_use]
-pub fn imgur_client_id() -> Option<String> {
-    env::var("RECORD_IMGUR_CLIENT_ID")
-        .ok()
-        .or_else(|| fs::read_to_string(settings_directory()?.join("imgur-client-id.txt")).ok())
-        .map(|id| id.trim().to_owned())
-        .filter(|id| !id.is_empty())
-}
-
-/// Checks the shape of an Imgur client ID.
-fn valid_client_id(id: &str) -> bool {
-    (6..=64).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
-}
-
-/// Stores the Imgur API client ID for later runs.
-pub fn save_imgur_client_id(id: &str) -> Result<(), String> {
-    let id = id.trim();
-    if !valid_client_id(id) {
-        return Err("an Imgur client ID has 6 to 64 letters and digits".to_owned());
-    }
-    write_setting("imgur-client-id.txt", id)
+/// Checks the shape of an API key before it is stored.
+fn valid_key(key: &str) -> bool {
+    (6..=128).contains(&key.len())
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 /// Writes one small settings file.
-fn write_setting(file: &str, text: &str) -> Result<(), String> {
+pub(crate) fn write_setting(file: &str, text: &str) -> Result<(), String> {
     let directory =
         settings_directory().ok_or_else(|| "the APPDATA folder is not available".to_owned())?;
     fs::create_dir_all(&directory)
@@ -709,8 +839,8 @@ pub fn import_sxcu(path: &Path) -> Result<String, String> {
     let name = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
-        .filter(|stem| !stem.is_empty() && !stem.eq_ignore_ascii_case("imgur"))
-        .ok_or_else(|| "the file needs a name other than imgur".to_owned())?;
+        .filter(|stem| !stem.is_empty() && Preset::find(stem).is_none())
+        .ok_or_else(|| "the file name is the name of a built-in destination".to_owned())?;
     Uploader::from_sxcu(&text, &name)?;
     let directory =
         uploaders_directory().ok_or_else(|| "the APPDATA folder is not available".to_owned())?;
@@ -720,84 +850,25 @@ pub fn import_sxcu(path: &Path) -> Result<String, String> {
     Ok(name)
 }
 
-/// The after-capture tasks that the hub remembers between runs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SavedTasks {
-    /// Places each image on the clipboard.
-    pub copy: bool,
-    /// Writes each image to a PNG file.
-    pub save: bool,
-    /// Uploads each image to the default destination.
-    pub upload: bool,
-}
-
-impl Default for SavedTasks {
-    fn default() -> Self {
-        Self {
-            copy: true,
-            save: true,
-            upload: false,
-        }
-    }
-}
-
-impl SavedTasks {
-    /// Reads `name=true` lines. Missing or unknown lines keep the default.
-    #[must_use]
-    pub fn parse(text: &str) -> Self {
-        let mut tasks = Self::default();
-        for line in text.lines() {
-            let Some((name, value)) = line.split_once('=') else {
-                continue;
-            };
-            let Ok(value) = value.trim().parse::<bool>() else {
-                continue;
-            };
-            match name.trim() {
-                "copy" => tasks.copy = value,
-                "save" => tasks.save = value,
-                "upload" => tasks.upload = value,
-                _ => {}
-            }
-        }
-        tasks
-    }
-
-    /// Formats the tasks in the form that [`Self::parse`] reads.
-    #[must_use]
-    pub fn to_text(&self) -> String {
-        format!(
-            "copy={}\nsave={}\nupload={}\n",
-            self.copy, self.save, self.upload
-        )
-    }
-
-    /// Loads the stored tasks, or the defaults when nothing is stored.
-    #[must_use]
-    pub fn load() -> Self {
-        settings_directory()
-            .and_then(|directory| fs::read_to_string(directory.join("screenshot-tasks.txt")).ok())
-            .map_or_else(Self::default, |text| Self::parse(&text))
-    }
-
-    /// Stores the tasks for later runs. A failure only loses the memory.
-    pub fn store(&self) {
-        let _ = write_setting("screenshot-tasks.txt", &self.to_text());
-    }
-}
-
 /// Finds an upload destination by name or by `.sxcu` path.
 ///
-/// `imgur` selects the built-in Imgur destination. Any other value is a path
-/// to a `.sxcu` file or the name of a file in the uploaders folder.
+/// The identifier of a built-in destination, such as `imgur` or `catbox`,
+/// selects it. Any other value is a path to a `.sxcu` file or the name of a
+/// file in the uploaders folder.
 pub fn resolve_destination(destination: &str) -> Result<Uploader, String> {
-    if destination.eq_ignore_ascii_case("imgur") {
-        let client_id = imgur_client_id().ok_or_else(|| {
-            "Imgur needs an API client ID. Open record screenshot, press P, and select \
-             Imgur to enter it"
-                .to_owned()
-        })?;
-        return Ok(Uploader::imgur(&client_id));
+    if let Some(preset) = Preset::find(destination) {
+        let key = match preset.key_label {
+            None => String::new(),
+            Some(label) => preset.key().ok_or_else(|| {
+                format!(
+                    "{} needs its {label}. Open record screenshot, press P, and select {} \
+                     to enter it",
+                    preset.name, preset.name
+                )
+            })?,
+        };
+        return Uploader::preset(preset.id, &key)
+            .ok_or_else(|| format!("{} is not available", preset.name));
     }
     let direct = Path::new(destination);
     let file = if direct.is_file() {
@@ -1053,28 +1124,69 @@ mod tests {
     }
 
     #[test]
-    fn saved_tasks_round_trip_and_ignore_bad_lines() {
-        let tasks = SavedTasks {
-            copy: false,
-            save: true,
-            upload: true,
-        };
-        assert_eq!(SavedTasks::parse(&tasks.to_text()), tasks);
+    fn keys_are_checked_before_they_are_stored() {
+        assert!(valid_key("0123456789abcde"));
+        assert!(valid_key("abc-DEF_123"));
+        for key in ["", "short", "has space 123", "semi;colon123"] {
+            assert!(!valid_key(key), "{key} should fail");
+        }
+    }
+
+    #[test]
+    fn every_preset_builds_a_request_for_its_service() {
+        for preset in PRESETS {
+            let uploader = Uploader::preset(preset.id, "key123456").unwrap();
+            assert_eq!(uploader.name, preset.name);
+            let request = uploader.request("a.png", b"P");
+            assert!(request.url.starts_with("https://"), "{}", request.url);
+            assert!(UrlParts::parse(&request.url).is_ok());
+        }
         assert_eq!(
-            SavedTasks::parse("copy=maybe\nnoise\nupload = true\nother=true"),
-            SavedTasks {
-                upload: true,
-                ..SavedTasks::default()
-            }
+            Preset::find("CATBOX").map(|preset| preset.name),
+            Some("Catbox")
+        );
+        assert!(Uploader::preset("nowhere", "").is_none());
+    }
+
+    #[test]
+    fn imgbb_sends_the_key_in_the_address_and_reads_both_links() {
+        let imgbb = Uploader::preset("imgbb", "abc123def").unwrap();
+        let request = imgbb.request("a.png", b"P");
+        assert_eq!(request.url, "https://api.imgbb.com/1/upload?key=abc123def");
+        assert!(String::from_utf8_lossy(&request.body).contains("name=\"image\"; filename"));
+        let body = r#"{"data":{"url":"https://i.ibb.co/x/a.png","delete_url":"https://ibb.co/x/d"},"success":true,"status":200}"#;
+        let result = imgbb.result(&response(200, body), "a.png").unwrap();
+        assert_eq!(result.url, "https://i.ibb.co/x/a.png");
+        assert_eq!(result.deletion_url.as_deref(), Some("https://ibb.co/x/d"));
+        let denied = r#"{"status_code":400,"error":{"message":"Invalid API v1 key.","code":100}}"#;
+        let error = imgbb.result(&response(400, denied), "a.png").unwrap_err();
+        assert_eq!(
+            error,
+            "ImgBB answered with HTTP status 400: Invalid API v1 key."
         );
     }
 
     #[test]
-    fn client_ids_are_checked_before_they_are_stored() {
-        assert!(valid_client_id("0123456789abcde"));
-        for id in ["", "short", "has space 123", "semi;colon123"] {
-            assert!(!valid_client_id(id), "{id} should fail");
-        }
+    fn catbox_and_litterbox_send_their_form_fields_and_read_a_plain_link() {
+        let catbox = Uploader::preset("catbox", "").unwrap();
+        let body = String::from_utf8_lossy(&catbox.request("a.png", b"P").body).into_owned();
+        assert!(body.contains("name=\"reqtype\"\r\n\r\nfileupload\r\n"));
+        assert!(body.contains("name=\"fileToUpload\"; filename=\"a.png\""));
+        let result = catbox
+            .result(
+                &response(200, "https://files.catbox.moe/abc123.png"),
+                "a.png",
+            )
+            .unwrap();
+        assert_eq!(result.url, "https://files.catbox.moe/abc123.png");
+        let litter = Uploader::preset("litterbox", "").unwrap();
+        let body = String::from_utf8_lossy(&litter.request("a.png", b"P").body).into_owned();
+        assert!(body.contains("name=\"time\"\r\n\r\n72h\r\n"));
+        assert!(
+            catbox
+                .result(&response(200, "No request type given."), "a.png")
+                .is_err()
+        );
     }
 
     #[test]

@@ -31,10 +31,11 @@ use record_tui::{
     cli::{Cli, Command, ScreenshotMode},
     screenshot::{
         CaptureMode, MonitorChoice, ScreenshotConfig, default_directory,
-        events::HubSettings,
+        events::{CaptureOptions, HubSettings},
         hub::{run_tray, tray_is_running},
+        saved::SavedSettings,
         take_screenshot, ui, unique_output_path,
-        upload::{SavedTasks, default_destination, resolve_destination},
+        upload::{default_destination, resolve_destination},
     },
     session::{OutputTarget, create_session_directory, mp3_output_path},
     tui,
@@ -421,25 +422,28 @@ fn run_screenshot(cli: Cli) -> Result<()> {
             Err(_) => None,
         },
         None if upload_requested => bail!(
-            "--upload needs a destination: pass imgur, a .sxcu name, or a .sxcu path, \
-             or write the name to %APPDATA%\\record\\uploader.txt"
+            "--upload needs a destination: pass a name such as imgur or catbox, or a \
+             .sxcu path, or select one in the hub with P"
         ),
         None => None,
     };
-    let monitor = if monitor.eq_ignore_ascii_case("pointer") {
-        MonitorChoice::Pointer
-    } else if monitor.eq_ignore_ascii_case("primary") {
-        MonitorChoice::Primary
-    } else {
-        MonitorChoice::Index(monitor.parse::<u32>().context(format!(
-            "invalid monitor {monitor}; use pointer, primary, or a monitor index"
-        ))?)
+    // The settings menu of the hub stores the defaults. A flag wins.
+    let saved = SavedSettings::load();
+    let monitor = match monitor.as_deref() {
+        None if saved.primary_monitor => MonitorChoice::Primary,
+        None => MonitorChoice::Pointer,
+        Some(name) if name.eq_ignore_ascii_case("pointer") => MonitorChoice::Pointer,
+        Some(name) if name.eq_ignore_ascii_case("primary") => MonitorChoice::Primary,
+        Some(name) => MonitorChoice::Index(name.parse::<u32>().context(format!(
+            "invalid monitor {name}; use pointer, primary, or a monitor index"
+        ))?),
     };
     let directory = match dir {
         Some(directory) => directory,
-        None if output.is_none() => default_directory(),
+        None if output.is_none() => saved.folder.clone().unwrap_or_else(default_directory),
         None => PathBuf::from("."),
     };
+    let sdr_white = sdr_white.or(saved.sdr_white_nits);
     let mode = match (region, mode) {
         (Some(region), _) => Some(CaptureMode::Custom(region)),
         (None, Some(ScreenshotMode::Region)) => Some(CaptureMode::Region),
@@ -454,15 +458,17 @@ fn run_screenshot(cli: Cli) -> Result<()> {
         if output.is_some() || count.is_some() {
             bail!("--output and --count need a capture mode such as region or full");
         }
-        let saved = SavedTasks::load();
         let settings = Arc::new(HubSettings {
-            directory,
-            monitor,
-            sdr_white_nits: sdr_white,
-            // The hub stores these choices. A flag on the command line wins.
+            options: Mutex::new(CaptureOptions {
+                directory,
+                monitor,
+                sdr_white_nits: sdr_white,
+                auto_interval: every
+                    .unwrap_or_else(|| Duration::from_secs_f32(saved.interval_seconds)),
+                delay: delay.unwrap_or_else(|| Duration::from_secs_f32(saved.delay_seconds)),
+            }),
             copy: AtomicBool::new(!no_copy && (saved.copy || !saved.save)),
             save: AtomicBool::new(saved.save),
-            auto_interval: every.unwrap_or(Duration::from_secs(5)),
             upload: AtomicBool::new(uploader.is_some() && (upload_requested || saved.upload)),
             uploader: Mutex::new(uploader),
         });

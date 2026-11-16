@@ -260,6 +260,40 @@ impl Canvas {
         }
     }
 
+    /// Fills a rectangle with antialiased round corners.
+    ///
+    /// A radius of half the shorter side gives a pill or a circle.
+    pub(crate) fn fill_round_rect(&mut self, area: Area, radius: f32, color: u32, alpha: u8) {
+        if area.is_empty() || alpha == 0 {
+            return;
+        }
+        let limit = area.width().min(area.height()) as f32 / 2.0;
+        let radius = radius.clamp(0.0, limit);
+        let visible = area.intersect(&self.bounds());
+        // Centers of the corner circles, in pixel center coordinates.
+        let (near_x, far_x) = (
+            area.left as f32 + radius - 0.5,
+            area.right as f32 - radius - 0.5,
+        );
+        let (near_y, far_y) = (
+            area.top as f32 + radius - 0.5,
+            area.bottom as f32 - radius - 0.5,
+        );
+        for y in visible.top..visible.bottom {
+            let dy = (near_y - y as f32).max(y as f32 - far_y).max(0.0);
+            for x in visible.left..visible.right {
+                let dx = (near_x - x as f32).max(x as f32 - far_x).max(0.0);
+                let coverage = if dx > 0.0 && dy > 0.0 {
+                    radius + 0.5 - (dx * dx + dy * dy).sqrt()
+                } else {
+                    1.0
+                };
+                let opacity = coverage_alpha(coverage) * u32::from(alpha) / 255;
+                self.blend_pixel(x, y, color, opacity);
+            }
+        }
+    }
+
     /// Draws a rectangle outline whose strokes lie inside `area`.
     pub(crate) fn stroke_rect(&mut self, area: Area, thickness: i32, color: u32) {
         let thickness = thickness
@@ -670,6 +704,25 @@ mod tests {
         assert_eq!(canvas.pixel(2, 2), Some(0));
         canvas.fill_rect(Area::new(0, 0, 4, 4), WHITE, 128);
         assert_eq!(canvas.pixel(3, 3), Some(0x0080_8080));
+    }
+
+    #[test]
+    fn round_rect_cuts_its_corners_and_fills_its_middle() {
+        let mut canvas = Canvas::new(40, 20, 0);
+        canvas.fill_round_rect(Area::new(0, 0, 40, 20), 8.0, RED, 255);
+        assert_eq!(canvas.pixel(0, 0), Some(0));
+        assert_eq!(canvas.pixel(39, 19), Some(0));
+        assert_eq!(canvas.pixel(0, 10), Some(RED));
+        assert_eq!(canvas.pixel(20, 0), Some(RED));
+        assert_eq!(canvas.pixel(4, 4), Some(RED));
+        let mut dot = Canvas::new(11, 11, 0);
+        dot.fill_round_rect(Area::new(0, 0, 11, 11), 99.0, WHITE, 255);
+        assert_eq!(dot.pixel(5, 5), Some(WHITE));
+        assert_eq!(dot.pixel(0, 5), Some(WHITE));
+        let corner = dot.pixel(1, 1).unwrap() & 0xff;
+        assert!((1..255).contains(&corner), "corner value {corner}");
+        dot.fill_round_rect(Area::new(0, 0, 11, 11), 2.0, RED, 128);
+        assert_eq!(dot.pixel(5, 5), Some(0x00ff_7f7f));
     }
 
     #[test]

@@ -180,13 +180,15 @@ pub enum Command {
         #[arg(short, long, value_name = "FILE")]
         output: Option<PathBuf>,
 
-        /// Folder for timestamped files. The default is Pictures\Screenshots.
+        /// Folder for timestamped files. The default is the stored folder or
+        /// Pictures\Screenshots.
         #[arg(long, value_name = "FOLDER")]
         dir: Option<PathBuf>,
 
-        /// Monitor selection: pointer (default), primary, or an index number.
-        #[arg(long, default_value = "pointer", value_name = "MONITOR")]
-        monitor: String,
+        /// Monitor selection: pointer, primary, or an index number. The
+        /// default is the monitor under the pointer or the stored setting.
+        #[arg(long, value_name = "MONITOR")]
+        monitor: Option<String>,
 
         /// Capture LEFT,TOP,WIDTH,HEIGHT in desktop pixels at once.
         #[arg(long, value_parser = DesktopRect::parse, value_name = "REGION", allow_hyphen_values = true)]
@@ -363,7 +365,7 @@ mod tests {
         };
         assert_eq!(mode, Some(ScreenshotMode::Window));
         assert_eq!(dir, Some(PathBuf::from("shots")));
-        assert_eq!(monitor, "1");
+        assert_eq!(monitor.as_deref(), Some("1"));
         assert_eq!(region.map(|region| region.left), Some(-1920));
         assert_eq!(every, Some(Duration::from_millis(2_500)));
         assert_eq!(count, Some(4));

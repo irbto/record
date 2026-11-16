@@ -13,7 +13,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -66,8 +65,6 @@ const WM_HUB_TRAY: u32 = WM_APP + 3;
 const TRAY_CLASS: PCWSTR = w!("RecordScreenshotTray");
 /// Name of the mutex that marks a running tray instance.
 const TRAY_MUTEX: PCWSTR = w!("Local\\RecordScreenshotTray");
-/// Delay of the delayed requests.
-const REQUEST_DELAY: Duration = Duration::from_secs(3);
 
 /// Request code bit that adds the three-second delay.
 const CODE_DELAYED: usize = 0x10;
@@ -250,7 +247,11 @@ fn message_loop(
                 }
                 WM_HUB_REQUEST if code == CODE_AUTO => {
                     if auto_timer == 0 {
-                        let interval = settings.auto_interval.as_millis().clamp(250, 3_600_000);
+                        let interval = settings
+                            .options()
+                            .auto_interval
+                            .as_millis()
+                            .clamp(250, 3_600_000);
                         auto_timer = SetTimer(None, 0, interval as u32, None);
                     } else {
                         let _ = KillTimer(None, auto_timer);
@@ -267,14 +268,15 @@ fn message_loop(
             };
             busy.store(true, Ordering::Relaxed);
             report(HubEvent::Capturing);
+            let options = settings.options();
             let config = ScreenshotConfig {
                 mode,
-                output: unique_output_path(&settings.directory, &video_timestamp()),
-                monitor: settings.monitor,
+                output: unique_output_path(&options.directory, &video_timestamp()),
+                monitor: options.monitor,
                 save: settings.save.load(Ordering::Relaxed),
                 copy: settings.copy.load(Ordering::Relaxed),
-                delay: delayed.then_some(REQUEST_DELAY),
-                sdr_white_nits: settings.sdr_white_nits,
+                delay: delayed.then_some(options.delay),
+                sdr_white_nits: options.sdr_white_nits,
                 upload: settings
                     .active_uploader()
                     .filter(|_| settings.upload.load(Ordering::Relaxed)),

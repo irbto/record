@@ -6,7 +6,10 @@
 //! Windows dependency. The overlay window only translates messages and
 //! presents the frames.
 
-use super::canvas::{Area, Canvas, Mask, Point, rgb};
+use super::{
+    canvas::{Area, Canvas, Mask, Point, rgb},
+    icons::{Icon, draw_icon},
+};
 
 /// Colors offered by the toolbar swatches and the number keys.
 pub(crate) const PALETTE: [u32; 6] = [
@@ -21,11 +24,13 @@ pub(crate) const PALETTE: [u32; 6] = [
 /// Largest value of the size setting.
 const MAX_SIZE: u32 = 10;
 /// Toolbar background color.
-const BAR_COLOR: u32 = rgb(0x20, 0x21, 0x24);
+const BAR_COLOR: u32 = rgb(0x1b, 0x1e, 0x24);
 /// Background of the button under the pointer.
-const HOVER_COLOR: u32 = rgb(0x3c, 0x40, 0x46);
+const HOVER_COLOR: u32 = rgb(0x33, 0x38, 0x41);
 /// Background of the active tool button.
-const ACTIVE_COLOR: u32 = rgb(0x0a, 0x64, 0xd8);
+const ACTIVE_COLOR: u32 = rgb(0x1f, 0x6f, 0xeb);
+/// Color of the toolbar outline and its separators.
+const BORDER_COLOR: u32 = rgb(0x3a, 0x3f, 0x47);
 /// Toolbar label color.
 const LABEL_COLOR: u32 = rgb(0xff, 0xff, 0xff);
 
@@ -67,10 +72,10 @@ pub(crate) enum Tool {
 }
 
 impl Tool {
-    /// Every tool in toolbar order, with its label and shortcut key.
+    /// Every tool in toolbar order, with its name and shortcut key.
     const ALL: [(Self, &'static str, char); 13] = [
-        (Self::Select, "Select", 's'),
-        (Self::Rectangle, "Rect", 'r'),
+        (Self::Select, "Select region", 's'),
+        (Self::Rectangle, "Rectangle", 'r'),
         (Self::Ellipse, "Ellipse", 'e'),
         (Self::Line, "Line", 'l'),
         (Self::Arrow, "Arrow", 'a'),
@@ -79,9 +84,9 @@ impl Tool {
         (Self::Marker, "Marker", 'h'),
         (Self::Pixelate, "Pixelate", 'x'),
         (Self::Blur, "Blur", 'b'),
-        (Self::Step, "Step", 'n'),
-        (Self::Spotlight, "Spot", 'o'),
-        (Self::Eraser, "Erase", 'd'),
+        (Self::Step, "Step number", 'n'),
+        (Self::Spotlight, "Spotlight", 'o'),
+        (Self::Eraser, "Eraser", 'd'),
     ];
 }
 
@@ -238,92 +243,128 @@ enum Action {
     Close,
 }
 
+impl Action {
+    /// Returns the icon of the button. Color buttons draw a swatch instead.
+    const fn icon(self) -> Option<Icon> {
+        Some(match self {
+            Self::Tool(Tool::Select) => Icon::Select,
+            Self::Tool(Tool::Rectangle) => Icon::Rectangle,
+            Self::Tool(Tool::Ellipse) => Icon::Ellipse,
+            Self::Tool(Tool::Line) => Icon::Line,
+            Self::Tool(Tool::Arrow) => Icon::Arrow,
+            Self::Tool(Tool::Pen) => Icon::Pen,
+            Self::Tool(Tool::Text) => Icon::Text,
+            Self::Tool(Tool::Marker) => Icon::Marker,
+            Self::Tool(Tool::Pixelate) => Icon::Pixelate,
+            Self::Tool(Tool::Blur) => Icon::Blur,
+            Self::Tool(Tool::Step) => Icon::Step,
+            Self::Tool(Tool::Spotlight) => Icon::Spotlight,
+            Self::Tool(Tool::Eraser) => Icon::Eraser,
+            Self::SizeDown => Icon::Minus,
+            Self::SizeUp => Icon::Plus,
+            Self::Undo => Icon::Undo,
+            Self::Redo => Icon::Redo,
+            Self::Copy => Icon::Copy,
+            Self::Save => Icon::Save,
+            Self::Close => Icon::Close,
+            Self::Color(_) => return None,
+        })
+    }
+}
+
 /// One toolbar button with its position relative to the toolbar corner.
 #[derive(Clone, Debug)]
 struct Button {
     action: Action,
     left: i32,
-    width: i32,
-    label: Option<Mask>,
+    /// The name and shortcut shown while the pointer rests on the button.
+    tip: Mask,
 }
 
 /// The floating tool strip. It is part of the overlay, never of the image.
 #[derive(Clone, Debug)]
 struct Toolbar {
     buttons: Vec<Button>,
-    size_labels: Vec<Mask>,
+    /// Positions of the thin lines between button groups.
+    separators: Vec<i32>,
+    /// Left edge of the stroke size preview.
     size_left: i32,
-    size_width: i32,
+    /// Side of one square button.
+    button: i32,
     width: i32,
     height: i32,
     margin: i32,
 }
 
 impl Toolbar {
-    /// Measures every label and places the buttons in one row.
-    fn build(text: &dyn TextRasterizer, scale: f32) -> Self {
+    /// Places the buttons in one row and renders their tips.
+    ///
+    /// The buttons shrink when the row is wider than `limit` pixels.
+    fn build(text: &dyn TextRasterizer, scale: f32, limit: i32) -> Self {
         let px = |value: f32| (value * scale).round().max(1.0) as i32;
-        let font = px(15.0) as u32;
-        let (height, padding, gap) = (px(32.0), px(8.0), px(8.0));
-        let mut buttons = Vec::new();
-        let mut cursor = px(4.0);
-        let labeled = |buttons: &mut Vec<Button>, cursor: &mut i32, action, label: &str| {
-            let mask = text.rasterize(label, font);
-            let width = mask.width as i32 + 2 * padding;
-            buttons.push(Button {
+        let (pad, gap) = (px(5.0), px(9.0));
+        let count = (Tool::ALL.len() + PALETTE.len() + 8) as i32;
+        let fitting = (limit - 3 * gap - 2 * pad) / count;
+        let button = px(36.0).min(fitting).max(px(18.0));
+        let font = px(14.0) as u32;
+        let mut toolbar = Self {
+            buttons: Vec::new(),
+            separators: Vec::new(),
+            size_left: 0,
+            button,
+            width: 0,
+            height: button + 2 * pad,
+            margin: px(12.0),
+        };
+        let mut cursor = pad;
+        let add = |toolbar: &mut Self, cursor: &mut i32, action: Action, tip: String| {
+            toolbar.buttons.push(Button {
                 action,
                 left: *cursor,
-                width,
-                label: Some(mask),
+                tip: text.rasterize(&tip, font),
             });
-            *cursor += width;
+            *cursor += button;
         };
-        for (tool, label, _) in Tool::ALL {
-            labeled(&mut buttons, &mut cursor, Action::Tool(tool), label);
+        let separate = |toolbar: &mut Self, cursor: &mut i32| {
+            toolbar.separators.push(*cursor + gap / 2);
+            *cursor += gap;
+        };
+        for (tool, name, key) in Tool::ALL {
+            let tip = format!("{name}  {}", key.to_ascii_uppercase());
+            add(&mut toolbar, &mut cursor, Action::Tool(tool), tip);
         }
-        cursor += gap;
+        separate(&mut toolbar, &mut cursor);
         for index in 0..PALETTE.len() {
-            buttons.push(Button {
-                action: Action::Color(index),
-                left: cursor,
-                width: height,
-                label: None,
-            });
-            cursor += height;
+            let tip = format!("Color  {}", index + 1);
+            add(&mut toolbar, &mut cursor, Action::Color(index), tip);
         }
-        cursor += gap;
-        labeled(&mut buttons, &mut cursor, Action::SizeDown, "-");
-        let size_labels: Vec<Mask> = (1..=MAX_SIZE)
-            .map(|size| text.rasterize(&size.to_string(), font))
-            .collect();
-        let size_left = cursor;
-        let size_width = size_labels
-            .iter()
-            .map(|mask| mask.width as i32)
-            .max()
-            .unwrap_or(0)
-            + padding;
-        cursor += size_width;
-        labeled(&mut buttons, &mut cursor, Action::SizeUp, "+");
-        cursor += gap;
-        for (action, label) in [
-            (Action::Undo, "Undo"),
-            (Action::Redo, "Redo"),
-            (Action::Copy, "Copy"),
-            (Action::Save, "Save"),
-            (Action::Close, "Close"),
+        separate(&mut toolbar, &mut cursor);
+        add(
+            &mut toolbar,
+            &mut cursor,
+            Action::SizeDown,
+            "Smaller  [".to_owned(),
+        );
+        toolbar.size_left = cursor;
+        cursor += button;
+        add(
+            &mut toolbar,
+            &mut cursor,
+            Action::SizeUp,
+            "Larger  ]".to_owned(),
+        );
+        separate(&mut toolbar, &mut cursor);
+        for (action, tip) in [
+            (Action::Undo, "Undo  Ctrl+Z"),
+            (Action::Redo, "Redo  Ctrl+Y"),
+            (Action::Copy, "Copy only  Ctrl+C"),
+            (Action::Save, "Save  Enter"),
+            (Action::Close, "Close  Esc"),
         ] {
-            labeled(&mut buttons, &mut cursor, action, label);
+            add(&mut toolbar, &mut cursor, action, tip.to_owned());
         }
-        Self {
-            buttons,
-            size_labels,
-            size_left,
-            size_width,
-            width: cursor + px(4.0),
-            height,
-            margin: px(12.0),
-        }
+        toolbar.width = cursor + pad;
+        toolbar
     }
 
     /// Returns the toolbar rectangle on a screen of the given size.
@@ -339,11 +380,12 @@ impl Toolbar {
 
     /// Returns the button rectangle in screen pixels.
     fn button_area(&self, bar: Area, button: &Button) -> Area {
+        let top = bar.top + (self.height - self.button) / 2;
         Area::new(
             bar.left + button.left,
-            bar.top,
-            bar.left + button.left + button.width,
-            bar.bottom,
+            top,
+            bar.left + button.left + self.button,
+            top + self.button,
         )
     }
 
@@ -386,7 +428,7 @@ impl Editor {
         } else {
             1.0
         };
-        let toolbar = Toolbar::build(text.as_ref(), scale);
+        let toolbar = Toolbar::build(text.as_ref(), scale, base.width() as i32);
         Self {
             flattened: base.clone(),
             base,
@@ -792,42 +834,106 @@ impl Editor {
         self.draw_toolbar(frame);
     }
 
-    /// Draws the toolbar with its active, hovered, and color states.
+    /// Draws the toolbar: icons, colors, the size preview, and the tip of
+    /// the button under the pointer.
     fn draw_toolbar(&self, frame: &mut Canvas) {
         let bar = self.toolbar_area();
-        frame.fill_rect(bar.inflate(1), 0, 255);
-        frame.fill_rect(bar, BAR_COLOR, 255);
-        let inset = self.px(3.0);
+        let corner = self.px(10.0) as f32;
+        let side = self.toolbar.button;
+        // A soft shadow from a few wide, faint layers.
+        for layer in 1..=4 {
+            let spread = self.px(layer as f32 * 1.5);
+            frame.fill_round_rect(
+                bar.offset(0, self.px(2.0)).inflate(spread),
+                corner + spread as f32,
+                0,
+                16,
+            );
+        }
+        frame.fill_round_rect(bar.inflate(1), corner + 1.0, BORDER_COLOR, 255);
+        frame.fill_round_rect(bar, corner, BAR_COLOR, 255);
+        for separator in &self.toolbar.separators {
+            let x = bar.left + separator;
+            frame.fill_rect(
+                Area::new(
+                    x,
+                    bar.top + self.px(10.0),
+                    x + 1,
+                    bar.bottom - self.px(10.0),
+                ),
+                BORDER_COLOR,
+                255,
+            );
+        }
+        let mut hovered_button = None;
         for button in &self.toolbar.buttons {
             let area = self.toolbar.button_area(bar, button);
+            let plate = area.inflate(-self.px(2.0));
             let active = button.action == Action::Tool(self.tool);
             let hovered = self.drag == Drag::Idle && area.contains(self.pointer);
-            if active {
-                frame.fill_rect(area.inflate(-inset), ACTIVE_COLOR, 255);
+            if hovered {
+                hovered_button = Some(button);
+            }
+            let paper = if active {
+                ACTIVE_COLOR
             } else if hovered {
-                frame.fill_rect(area.inflate(-inset), HOVER_COLOR, 255);
+                HOVER_COLOR
+            } else {
+                BAR_COLOR
+            };
+            if paper != BAR_COLOR {
+                frame.fill_round_rect(plate, self.px(7.0) as f32, paper, 255);
             }
             if let Action::Color(index) = button.action {
-                let swatch = area.inflate(-2 * inset);
+                let dot = area.inflate(-(side * 5 / 18));
                 if index == self.color {
-                    frame.fill_rect(swatch.inflate(inset - 1), LABEL_COLOR, 255);
-                    frame.fill_rect(swatch.inflate(1), BAR_COLOR, 255);
+                    frame.fill_round_rect(dot.inflate(self.px(4.0)), side as f32, LABEL_COLOR, 255);
+                    frame.fill_round_rect(dot.inflate(self.px(2.0)), side as f32, paper, 255);
                 }
-                frame.fill_rect(swatch, PALETTE[index], 255);
-                frame.stroke_rect(swatch, 1, rgb(0x80, 0x80, 0x80));
-            }
-            if let Some(mask) = &button.label {
-                frame.draw_mask(centered(area, mask), mask, LABEL_COLOR);
+                frame.fill_round_rect(dot.inflate(1), side as f32, BORDER_COLOR, 255);
+                frame.fill_round_rect(dot, side as f32, PALETTE[index], 255);
+            } else if let Some(icon) = button.action.icon() {
+                draw_icon(frame, icon, area.inflate(-(side / 4)), LABEL_COLOR, paper);
             }
         }
-        if let Some(mask) = self.toolbar.size_labels.get(self.size as usize - 1) {
-            let area = Area::new(
-                bar.left + self.toolbar.size_left,
-                bar.top,
-                bar.left + self.toolbar.size_left + self.toolbar.size_width,
-                bar.bottom,
+        // The size preview is a dot as wide as the stroke it stands for.
+        let slot = Area::new(
+            bar.left + self.toolbar.size_left,
+            bar.top,
+            bar.left + self.toolbar.size_left + side,
+            bar.bottom,
+        );
+        let diameter = self.weight(Tool::Line).clamp(2, (side * 3 / 4).max(2));
+        let left = slot.left + (side - diameter) / 2;
+        let top = slot.top + (slot.height() - diameter) / 2;
+        frame.fill_round_rect(
+            Area::new(left, top, left + diameter, top + diameter),
+            side as f32,
+            PALETTE[self.color],
+            255,
+        );
+        if let Some(button) = hovered_button {
+            let pad = self.px(7.0);
+            let area = self.toolbar.button_area(bar, button);
+            let width = button.tip.width as i32 + 2 * pad;
+            let height = button.tip.height as i32 + pad;
+            let screen = self.base.bounds();
+            let left = (area.left + (side - width) / 2)
+                .clamp(screen.left, (screen.right - width).max(screen.left));
+            let top = if self.toolbar_bottom {
+                bar.top - height - self.px(6.0)
+            } else {
+                bar.bottom + self.px(6.0)
+            };
+            let plate = Area::new(left, top, left + width, top + height);
+            frame.fill_round_rect(
+                plate.inflate(1),
+                self.px(6.0) as f32 + 1.0,
+                BORDER_COLOR,
+                255,
             );
-            frame.draw_mask(centered(area, mask), mask, LABEL_COLOR);
+            frame.fill_round_rect(plate, self.px(6.0) as f32, BAR_COLOR, 255);
+            frame.draw_mask(centered(plate, &button.tip), &button.tip, LABEL_COLOR);
         }
     }
 
@@ -986,7 +1092,10 @@ pub(crate) mod tests {
         let mut frame = Canvas::new(800, 600, 0);
         editor.compose(&mut frame);
         let bar = editor.toolbar_area();
-        assert_eq!(frame.pixel(bar.left + 1, bar.top + 1), Some(BAR_COLOR));
+        assert_eq!(
+            frame.pixel(bar.right - 2, bar.top + bar.height() / 2),
+            Some(BAR_COLOR)
+        );
         assert_ne!(frame.pixel(700, 500), Some(GRAY));
         assert_eq!(frame.pixel(200, 300), Some(GRAY));
         assert!(editor.flattened.pixels().iter().all(|pixel| *pixel == GRAY));
@@ -1022,6 +1131,35 @@ pub(crate) mod tests {
         let close = center(&editor, Action::Close);
         assert_eq!(editor.pointer_down(close), Outcome::Cancel);
         assert!(bar.right <= 1600, "toolbar is {} pixels wide", bar.width());
+    }
+
+    #[test]
+    fn the_toolbar_shrinks_to_fit_a_narrow_screen_and_shows_tips() {
+        let mut editor = editor();
+        let bar = editor.toolbar_area();
+        assert!(bar.left >= 0 && bar.right <= 800, "{bar:?}");
+        let wide = Editor::new(Canvas::new(2560, 1440, GRAY), 1.0, Box::new(BoxText));
+        assert_eq!(wide.toolbar.button, 36);
+        assert!(editor.toolbar.button < 36);
+        let blur = editor
+            .toolbar
+            .buttons
+            .iter()
+            .find(|button| button.action == Action::Tool(Tool::Blur))
+            .unwrap();
+        let area = editor.toolbar.button_area(bar, blur);
+        let mut plain = Canvas::new(800, 600, 0);
+        editor.compose(&mut plain);
+        editor.pointer_move(Point::new(area.left + 3, area.top + 3));
+        let mut hovered = Canvas::new(800, 600, 0);
+        editor.compose(&mut hovered);
+        let below = |frame: &Canvas| {
+            (0..800)
+                .filter(|x| frame.pixel(*x, bar.bottom + 14) != Some(GRAY))
+                .count()
+        };
+        assert_eq!(below(&plain), 0);
+        assert!(below(&hovered) > 20, "the tip is missing");
     }
 
     #[test]
@@ -1118,11 +1256,11 @@ pub(crate) mod tests {
     #[test]
     fn spotlight_dims_outside_and_eraser_uses_the_sampled_color() {
         let mut base = Canvas::new(800, 600, GRAY);
-        base.fill_rect(Area::new(0, 0, 800, 100), 0x00ff_ffff, 255);
+        base.fill_rect(Area::new(0, 0, 800, 200), 0x00ff_ffff, 255);
         let mut editor = Editor::new(base, 1.0, Box::new(BoxText));
         editor.key(Key::Char('d'));
-        drag(&mut editor, (50, 50), (150, 250));
-        assert_eq!(editor.result().pixel(100, 200), Some(0x00ff_ffff));
+        drag(&mut editor, (50, 150), (150, 280));
+        assert_eq!(editor.result().pixel(100, 260), Some(0x00ff_ffff));
         editor.key(Key::Char('o'));
         drag(&mut editor, (300, 300), (500, 500));
         assert_eq!(editor.result().pixel(400, 400), Some(GRAY));

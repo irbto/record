@@ -31,8 +31,11 @@ mod http;
 /// The capture thread with global hotkeys.
 #[cfg(windows)]
 pub mod hub;
+mod icons;
 #[cfg(windows)]
 mod overlay;
+/// Stored defaults of the hub.
+pub mod saved;
 /// The terminal hub.
 pub mod ui;
 /// Upload destinations in the ShareX custom uploader format.

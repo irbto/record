@@ -13,21 +13,30 @@ use crossbeam_channel::Receiver;
 
 use super::{CaptureMode, MonitorChoice, ScreenshotSummary, upload::Uploader};
 
-/// Settings shared by the hub thread and the terminal hub.
-#[derive(Debug)]
-pub struct HubSettings {
+/// The capture defaults that the settings menu can change while the hub runs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CaptureOptions {
     /// Folder that receives the PNG files.
     pub directory: PathBuf,
     /// Monitor for the region and monitor modes.
     pub monitor: MonitorChoice,
     /// Overrides the SDR white level that Windows reports, in nits.
     pub sdr_white_nits: Option<f32>,
+    /// Time between auto captures.
+    pub auto_interval: Duration,
+    /// Wait of the delayed captures.
+    pub delay: Duration,
+}
+
+/// Settings shared by the hub thread and the terminal hub.
+#[derive(Debug)]
+pub struct HubSettings {
+    /// Capture defaults. The settings menu changes them.
+    pub options: Mutex<CaptureOptions>,
     /// Places each image on the clipboard.
     pub copy: AtomicBool,
     /// Writes each image to a PNG file.
     pub save: AtomicBool,
-    /// Time between auto captures.
-    pub auto_interval: Duration,
     /// Destination for uploads, when one is configured. The hub can change it.
     pub uploader: Mutex<Option<Uploader>>,
     /// Uploads each image to the destination and copies the link.
@@ -66,6 +75,15 @@ pub enum HubEvent {
 }
 
 impl HubSettings {
+    /// Returns a copy of the current capture defaults.
+    #[must_use]
+    pub fn options(&self) -> CaptureOptions {
+        match self.options.lock() {
+            Ok(options) => options.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
     /// Returns a copy of the configured upload destination.
     #[must_use]
     pub fn active_uploader(&self) -> Option<Uploader> {

@@ -25,12 +25,13 @@ use ratatui::{
 use ratatui_image::{Image, Resize, picker::Picker, protocol::Protocol};
 
 use super::{
-    CaptureMode,
-    events::{CaptureHub, HubEvent, HubRequest, HubSettings},
+    CaptureMode, MonitorChoice,
+    events::{CaptureHub, CaptureOptions, HubEvent, HubRequest, HubSettings},
     history::{HistoryEntry, list_history},
+    saved::{SavedSettings, autostart_enabled, parse_sdr_white, parse_seconds, set_autostart},
     upload::{
-        SavedTasks, imgur_client_id, import_sxcu, list_destinations, resolve_destination,
-        save_imgur_client_id, set_default_destination,
+        PRESETS, Preset, import_sxcu, list_destinations, resolve_destination,
+        set_default_destination,
     },
 };
 use crate::tui::{AMBER, BORDER, CYAN, GREEN, MUTED, RED};
@@ -57,6 +58,7 @@ enum MenuItem {
     SaveToggle,
     UploadToggle,
     Destination,
+    Settings,
     Folder,
     OpenImage,
     CopyImage,
@@ -72,7 +74,7 @@ enum Row {
 }
 
 /// The menu in display order.
-const ROWS: [Row; 23] = [
+const ROWS: [Row; 24] = [
     Row::Heading("CAPTURE"),
     Row::Item(MenuItem::Region),
     Row::Item(MenuItem::Fullscreen),
@@ -89,10 +91,11 @@ const ROWS: [Row; 23] = [
     Row::Item(MenuItem::UploadToggle),
     Row::Item(MenuItem::Destination),
     Row::Gap,
-    Row::Heading("FILES"),
+    Row::Heading("FILES AND SETUP"),
     Row::Item(MenuItem::Folder),
     Row::Item(MenuItem::OpenImage),
     Row::Item(MenuItem::CopyImage),
+    Row::Item(MenuItem::Settings),
     Row::Gap,
     Row::Item(MenuItem::Quit),
     Row::Gap,
@@ -108,23 +111,57 @@ enum Focus {
 /// What a text prompt collects.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Prompt {
-    ImgurClientId,
+    /// The API key of a built-in destination.
+    Key(&'static Preset),
     ImportPath,
+    Folder,
+    Delay,
+    Interval,
+    SdrWhite,
 }
+
+impl Prompt {
+    /// Reports whether the prompt belongs to the settings menu.
+    const fn is_setting(self) -> bool {
+        matches!(
+            self,
+            Self::Folder | Self::Delay | Self::Interval | Self::SdrWhite
+        )
+    }
+}
+
+/// One row of the settings menu.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Setting {
+    Folder,
+    Delay,
+    Interval,
+    Monitor,
+    SdrWhite,
+    Autostart,
+}
+
+/// The settings menu in display order.
+const SETTINGS: [Setting; 6] = [
+    Setting::Folder,
+    Setting::Delay,
+    Setting::Interval,
+    Setting::Monitor,
+    Setting::SdrWhite,
+    Setting::Autostart,
+];
 
 /// One row of the destination list.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Choice {
     /// Turn uploads off.
     Off,
-    /// The built-in Imgur destination.
-    Imgur,
+    /// A built-in destination.
+    Preset(&'static Preset),
     /// A `.sxcu` file in the uploaders folder.
     Named(String),
     /// Ask for a `.sxcu` path to import.
     Import,
-    /// Ask for a new Imgur client ID.
-    ChangeImgurId,
 }
 
 /// The dialog shown over the hub.
@@ -132,6 +169,7 @@ enum Choice {
 enum Dialog {
     None,
     Destinations { choices: Vec<Choice>, cursor: usize },
+    Settings { cursor: usize },
     Input { prompt: Prompt, text: String },
 }
 
@@ -159,6 +197,8 @@ struct App<H: CaptureHub> {
     auto: bool,
     capturing: bool,
     quit: bool,
+    /// The sign-in entry state, read when the settings menu opens.
+    autostart: bool,
     /// Writes choices to the settings folder. Tests turn this off.
     persist: bool,
 }
@@ -175,7 +215,7 @@ pub fn run(settings: Arc<HubSettings>) -> Result<()> {
 impl<H: CaptureHub> App<H> {
     /// Creates the hub state and reads the history of the screenshots folder.
     fn new(settings: Arc<HubSettings>, hub: H, picker: Picker) -> Self {
-        let history = list_history(&settings.directory);
+        let history = list_history(&settings.options().directory);
         Self {
             settings,
             hub,
@@ -192,6 +232,7 @@ impl<H: CaptureHub> App<H> {
             auto: false,
             capturing: false,
             quit: false,
+            autostart: false,
             persist: true,
         }
     }
@@ -258,8 +299,7 @@ impl<H: CaptureHub> App<H> {
                     status.push_str(&format!(" · clipboard failed: {error}"));
                 }
                 self.report(status, failed);
-                self.history = list_history(&self.settings.directory);
-                self.selected = 0;
+                self.refresh_history();
             }
             HubEvent::Cancelled => {
                 self.capturing = false;
@@ -271,7 +311,7 @@ impl<H: CaptureHub> App<H> {
             }
             HubEvent::Auto(active) => {
                 self.auto = active;
-                let seconds = self.settings.auto_interval.as_secs_f64();
+                let seconds = self.settings.options().auto_interval.as_secs_f64();
                 self.report(
                     if active {
                         format!("Auto capture every {seconds} s")
@@ -319,6 +359,7 @@ impl<H: CaptureHub> App<H> {
                     'o' => MenuItem::Folder,
                     'u' => MenuItem::UploadToggle,
                     'p' => MenuItem::Destination,
+                    's' => MenuItem::Settings,
                     _ => return,
                 };
                 self.activate(item);
@@ -333,9 +374,16 @@ impl<H: CaptureHub> App<H> {
             Dialog::None => {}
             Dialog::Destinations { choices, cursor } => match code {
                 KeyCode::Esc | KeyCode::Char('q') => self.dialog = Dialog::None,
-                KeyCode::Up | KeyCode::Char('k') => *cursor = cursor.saturating_sub(1),
+                KeyCode::Up => *cursor = cursor.saturating_sub(1),
                 KeyCode::Down | KeyCode::Char('j') => {
                     *cursor = (*cursor + 1).min(choices.len().saturating_sub(1));
+                }
+                KeyCode::Char('k') => {
+                    if let Choice::Preset(preset) = choices[*cursor]
+                        && preset.key_label.is_some()
+                    {
+                        self.ask(Prompt::Key(preset), String::new());
+                    }
                 }
                 KeyCode::Enter => {
                     let choice = choices[*cursor].clone();
@@ -343,8 +391,23 @@ impl<H: CaptureHub> App<H> {
                 }
                 _ => {}
             },
+            Dialog::Settings { cursor } => match code {
+                KeyCode::Esc | KeyCode::Char('q') => self.dialog = Dialog::None,
+                KeyCode::Up | KeyCode::Char('k') => *cursor = cursor.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *cursor = (*cursor + 1).min(SETTINGS.len() - 1);
+                }
+                KeyCode::Enter => {
+                    let setting = SETTINGS[*cursor];
+                    self.change(setting);
+                }
+                _ => {}
+            },
             Dialog::Input { prompt, text } => match code {
-                KeyCode::Esc => self.open_destinations(),
+                KeyCode::Esc => {
+                    let prompt = *prompt;
+                    self.close_prompt(prompt);
+                }
                 KeyCode::Backspace => {
                     text.pop();
                 }
@@ -358,14 +421,27 @@ impl<H: CaptureHub> App<H> {
         }
     }
 
+    /// Returns from a prompt to the menu that opened it.
+    fn close_prompt(&mut self, prompt: Prompt) {
+        if prompt.is_setting() {
+            let cursor = match prompt {
+                Prompt::Delay => 1,
+                Prompt::Interval => 2,
+                Prompt::SdrWhite => 4,
+                _ => 0,
+            };
+            self.dialog = Dialog::Settings { cursor };
+        } else {
+            self.open_destinations();
+        }
+    }
+
     /// Opens the destination list with the active destination selected.
     fn open_destinations(&mut self) {
-        let mut choices = vec![Choice::Off, Choice::Imgur];
+        let mut choices = vec![Choice::Off];
+        choices.extend(PRESETS.iter().map(Choice::Preset));
         choices.extend(list_destinations().into_iter().map(Choice::Named));
         choices.push(Choice::Import);
-        if imgur_client_id().is_some() {
-            choices.push(Choice::ChangeImgurId);
-        }
         let active = self
             .settings
             .active_uploader()
@@ -375,7 +451,7 @@ impl<H: CaptureHub> App<H> {
             .iter()
             .position(|choice| match (choice, &active) {
                 (Choice::Off, _) => !uploading || active.is_none(),
-                (Choice::Imgur, Some(name)) => name == "Imgur",
+                (Choice::Preset(preset), Some(name)) => preset.name == name,
                 (Choice::Named(file), Some(name)) => file == name,
                 _ => false,
             })
@@ -388,33 +464,116 @@ impl<H: CaptureHub> App<H> {
         match choice {
             Choice::Off => {
                 self.settings.upload.store(false, Ordering::Relaxed);
-                self.store_tasks();
+                self.store_settings();
                 self.dialog = Dialog::None;
                 self.report("Uploads are off", false);
             }
-            Choice::Imgur if imgur_client_id().is_none() => self.ask(Prompt::ImgurClientId),
-            Choice::Imgur => self.select_destination("imgur"),
+            Choice::Preset(preset) if !preset.ready() => {
+                self.ask(Prompt::Key(preset), String::new());
+            }
+            Choice::Preset(preset) => self.select_destination(preset.id),
             Choice::Named(name) => self.select_destination(&name),
-            Choice::Import => self.ask(Prompt::ImportPath),
-            Choice::ChangeImgurId => self.ask(Prompt::ImgurClientId),
+            Choice::Import => self.ask(Prompt::ImportPath, String::new()),
         }
     }
 
-    /// Opens a text prompt.
-    fn ask(&mut self, prompt: Prompt) {
-        self.dialog = Dialog::Input {
-            prompt,
-            text: String::new(),
-        };
+    /// Opens a text prompt that starts with the given text.
+    fn ask(&mut self, prompt: Prompt, text: String) {
+        self.dialog = Dialog::Input { prompt, text };
+    }
+
+    /// Runs one row of the settings menu.
+    fn change(&mut self, setting: Setting) {
+        let options = self.settings.options();
+        match setting {
+            Setting::Folder => self.ask(Prompt::Folder, options.directory.display().to_string()),
+            Setting::Delay => self.ask(Prompt::Delay, options.delay.as_secs_f32().to_string()),
+            Setting::Interval => {
+                self.ask(
+                    Prompt::Interval,
+                    options.auto_interval.as_secs_f32().to_string(),
+                );
+            }
+            Setting::SdrWhite => self.ask(
+                Prompt::SdrWhite,
+                options
+                    .sdr_white_nits
+                    .map(|nits| nits.to_string())
+                    .unwrap_or_default(),
+            ),
+            Setting::Monitor => {
+                let monitor = if options.monitor == MonitorChoice::Primary {
+                    MonitorChoice::Pointer
+                } else {
+                    MonitorChoice::Primary
+                };
+                self.update_options(|options| options.monitor = monitor);
+            }
+            Setting::Autostart => match set_autostart(!self.autostart) {
+                Ok(()) => {
+                    self.autostart = !self.autostart;
+                    self.report(
+                        if self.autostart {
+                            "The tray starts when you sign in"
+                        } else {
+                            "The tray no longer starts when you sign in"
+                        },
+                        false,
+                    );
+                }
+                Err(error) => self.report(error, true),
+            },
+        }
+    }
+
+    /// Changes the capture defaults and stores them.
+    fn update_options(&mut self, change: impl FnOnce(&mut CaptureOptions)) {
+        if let Ok(mut options) = self.settings.options.lock() {
+            change(&mut options);
+        }
+        self.store_settings();
+    }
+
+    /// Reads the screenshots folder again and selects the newest file.
+    fn refresh_history(&mut self) {
+        self.history = list_history(&self.settings.options().directory);
+        self.selected = 0;
     }
 
     /// Applies the text of a finished prompt.
     fn submit(&mut self, prompt: Prompt, text: &str) {
-        let destination = match prompt {
-            Prompt::ImgurClientId => save_imgur_client_id(text).map(|()| "imgur".to_owned()),
+        let applied = match prompt {
+            Prompt::Key(preset) => preset.save_key(text).map(|()| preset.id.to_owned()),
             Prompt::ImportPath => import_sxcu(Path::new(text)),
+            Prompt::Folder if text.is_empty() => Err("enter a folder path".to_owned()),
+            Prompt::Folder => match std::fs::create_dir_all(text) {
+                Ok(()) => {
+                    self.update_options(|options| options.directory = text.into());
+                    self.refresh_history();
+                    Ok(String::new())
+                }
+                Err(error) => Err(format!("could not use {text}: {error}")),
+            },
+            Prompt::Delay => parse_seconds(text).map(|seconds| {
+                self.update_options(|options| options.delay = Duration::from_secs_f32(seconds));
+                String::new()
+            }),
+            Prompt::Interval => parse_seconds(text).map(|seconds| {
+                self.update_options(|options| {
+                    options.auto_interval = Duration::from_secs_f32(seconds);
+                });
+                String::new()
+            }),
+            Prompt::SdrWhite => parse_sdr_white(text).map(|nits| {
+                self.update_options(|options| options.sdr_white_nits = nits);
+                String::new()
+            }),
         };
-        match destination {
+        match applied {
+            Ok(_) if prompt.is_setting() => {
+                self.close_prompt(prompt);
+                self.report("Setting saved", false);
+            }
             Ok(destination) => self.select_destination(&destination),
             Err(error) => self.report(error, true),
         }
@@ -429,7 +588,7 @@ impl<H: CaptureHub> App<H> {
                     *active = Some(uploader);
                 }
                 self.settings.upload.store(true, Ordering::Relaxed);
-                self.store_tasks();
+                self.store_settings();
                 let stored = if self.persist {
                     set_default_destination(Some(destination))
                 } else {
@@ -445,17 +604,26 @@ impl<H: CaptureHub> App<H> {
         }
     }
 
-    /// Stores the after-capture tasks for later runs.
-    fn store_tasks(&self) {
+    /// Stores every hub choice for later runs.
+    fn store_settings(&mut self) {
         if !self.persist {
             return;
         }
-        SavedTasks {
+        let options = self.settings.options();
+        let stored = SavedSettings {
             copy: self.settings.copy.load(Ordering::Relaxed),
             save: self.settings.save.load(Ordering::Relaxed),
             upload: self.settings.upload.load(Ordering::Relaxed),
+            folder: Some(options.directory),
+            delay_seconds: options.delay.as_secs_f32(),
+            interval_seconds: options.auto_interval.as_secs_f32(),
+            primary_monitor: options.monitor == MonitorChoice::Primary,
+            sdr_white_nits: options.sdr_white_nits,
         }
         .store();
+        if let Err(error) = stored {
+            self.report(error, true);
+        }
     }
 
     /// Moves the menu cursor or the history selection by one entry.
@@ -506,7 +674,8 @@ impl<H: CaptureHub> App<H> {
                 self.report("A capture is already running", false);
             } else {
                 if matches!(request, HubRequest::Delayed(_)) {
-                    self.report("Capturing in 3 seconds", false);
+                    let seconds = self.settings.options().delay.as_secs_f32();
+                    self.report(format!("Capturing in {seconds} seconds"), false);
                 }
                 self.hub.request(request);
             }
@@ -522,15 +691,20 @@ impl<H: CaptureHub> App<H> {
             MenuItem::UploadToggle => {
                 if self.settings.active_uploader().is_some() {
                     self.settings.upload.fetch_xor(true, Ordering::Relaxed);
-                    self.store_tasks();
+                    self.store_settings();
                 } else {
                     self.open_destinations();
                 }
             }
             MenuItem::Destination => self.open_destinations(),
+            MenuItem::Settings => {
+                self.autostart = autostart_enabled();
+                self.dialog = Dialog::Settings { cursor: 0 };
+            }
             MenuItem::Folder => {
-                let _ = std::fs::create_dir_all(&self.settings.directory);
-                self.launch(Command::new("explorer").arg(&self.settings.directory));
+                let directory = self.settings.options().directory;
+                let _ = std::fs::create_dir_all(&directory);
+                self.launch(Command::new("explorer").arg(directory));
             }
             MenuItem::Recording => {
                 if let Ok(program) = std::env::current_exe() {
@@ -574,7 +748,7 @@ impl<H: CaptureHub> App<H> {
         if !active {
             other.store(true, Ordering::Relaxed);
         }
-        self.store_tasks();
+        self.store_settings();
     }
 
     /// Starts a helper program and reports a failure in the status line.
@@ -605,7 +779,14 @@ impl<H: CaptureHub> App<H> {
             MenuItem::Window => ("Active window".to_owned(), hotkey(2, "Alt+PrtSc"), None),
             MenuItem::Monitor => plain("Active monitor", "M"),
             MenuItem::LastRegion => plain("Last region", "L"),
-            MenuItem::DelayedRegion => plain("Region in 3 seconds", "D"),
+            MenuItem::DelayedRegion => (
+                format!(
+                    "Region in {} seconds",
+                    self.settings.options().delay.as_secs_f32()
+                ),
+                "D".to_owned(),
+                None,
+            ),
             MenuItem::Auto => ("Auto capture".to_owned(), "A".to_owned(), Some(self.auto)),
             MenuItem::Recording => plain("Screen recording", "V"),
             MenuItem::CopyToggle => (
@@ -628,6 +809,7 @@ impl<H: CaptureHub> App<H> {
                 "P".to_owned(),
                 None,
             ),
+            MenuItem::Settings => plain("Settings", "S"),
             MenuItem::Folder => plain("Open screenshots folder", "O"),
             MenuItem::OpenImage => plain("Open selected image", "Enter"),
             MenuItem::CopyImage => plain("Copy selected image", "C"),
@@ -658,6 +840,7 @@ impl<H: CaptureHub> App<H> {
             Dialog::Destinations { choices, cursor } => {
                 self.render_destinations(frame, choices, *cursor);
             }
+            Dialog::Settings { cursor } => self.render_settings(frame, *cursor),
             Dialog::Input { prompt, text } => render_input(frame, *prompt, text),
         }
     }
@@ -676,7 +859,7 @@ impl<H: CaptureHub> App<H> {
         ]);
         frame.render_widget(Paragraph::new(title), area);
         let folder = Line::styled(
-            format!("{} ", self.settings.directory.display()),
+            format!("{} ", self.settings.options().directory.display()),
             Style::default().fg(MUTED),
         );
         frame.render_widget(Paragraph::new(folder).alignment(Alignment::Right), area);
@@ -848,21 +1031,21 @@ impl<H: CaptureHub> App<H> {
 
     /// Draws the destination list over the hub.
     fn render_destinations(&self, frame: &mut Frame, choices: &[Choice], cursor: usize) {
-        let has_id = imgur_client_id().is_some();
-        let area = centered(frame.area(), 58, choices.len() as u16 + 5);
-        let block = dialog_block(" Upload destination ");
+        let area = centered(frame.area(), 62, choices.len() as u16 + 5);
+        let block = dialog_block(" Upload destination ".to_owned());
         let inner = block.inner(area);
         let mut lines: Vec<Line> = choices
             .iter()
             .enumerate()
             .map(|(index, choice)| {
                 let (label, note) = match choice {
-                    Choice::Off => ("Off", "keep images local"),
-                    Choice::Imgur if has_id => ("Imgur", "ready"),
-                    Choice::Imgur => ("Imgur", "needs a client ID"),
+                    Choice::Off => ("Off", "keep images on this computer"),
+                    Choice::Preset(preset) if preset.key_label.is_some() && preset.ready() => {
+                        (preset.name, "ready")
+                    }
+                    Choice::Preset(preset) => (preset.name, preset.note),
                     Choice::Named(name) => (name.as_str(), ".sxcu"),
                     Choice::Import => ("Import a .sxcu file", ""),
-                    Choice::ChangeImgurId => ("Change the Imgur client ID", ""),
                 };
                 menu_line(
                     label,
@@ -876,11 +1059,91 @@ impl<H: CaptureHub> App<H> {
             .collect();
         lines.push(Line::default());
         lines.push(Line::styled(
-            "  Enter select · Esc close",
+            "  Enter select · K change key · Esc close",
             Style::default().fg(MUTED),
         ));
         frame.render_widget(Clear, area);
         frame.render_widget(Paragraph::new(lines).block(block), area);
+    }
+
+    /// Draws the settings menu over the hub.
+    fn render_settings(&self, frame: &mut Frame, cursor: usize) {
+        let options = self.settings.options();
+        let area = centered(frame.area(), 66, SETTINGS.len() as u16 + 5);
+        let block = dialog_block(" Settings ".to_owned());
+        let inner = block.inner(area);
+        let mut lines: Vec<Line> = SETTINGS
+            .iter()
+            .enumerate()
+            .map(|(index, setting)| {
+                let (label, value, switch) = match setting {
+                    Setting::Folder => (
+                        "Screenshots folder",
+                        tail(&options.directory.display().to_string(), 36),
+                        None,
+                    ),
+                    Setting::Delay => (
+                        "Delay of delayed captures",
+                        format!("{} s", options.delay.as_secs_f32()),
+                        None,
+                    ),
+                    Setting::Interval => (
+                        "Auto capture interval",
+                        format!("{} s", options.auto_interval.as_secs_f32()),
+                        None,
+                    ),
+                    Setting::Monitor => (
+                        "Monitor",
+                        match options.monitor {
+                            MonitorChoice::Pointer => "under the pointer".to_owned(),
+                            MonitorChoice::Primary => "primary".to_owned(),
+                            MonitorChoice::Index(index) => format!("number {index}"),
+                        },
+                        None,
+                    ),
+                    Setting::SdrWhite => (
+                        "HDR: SDR white level",
+                        options.sdr_white_nits.map_or_else(
+                            || "from Windows".to_owned(),
+                            |nits| format!("{nits} nits"),
+                        ),
+                        None,
+                    ),
+                    Setting::Autostart => (
+                        "Start in the tray at sign-in",
+                        String::new(),
+                        Some(self.autostart),
+                    ),
+                };
+                menu_line(
+                    label,
+                    &value,
+                    switch,
+                    index == cursor,
+                    true,
+                    inner.width as usize,
+                )
+            })
+            .collect();
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            "  Enter change · Esc close",
+            Style::default().fg(MUTED),
+        ));
+        frame.render_widget(Clear, area);
+        frame.render_widget(Paragraph::new(lines).block(block), area);
+    }
+}
+
+/// Keeps the end of a long text and marks the cut with an ellipsis.
+fn tail(text: &str, limit: usize) -> String {
+    let count = text.chars().count();
+    if count <= limit {
+        text.to_owned()
+    } else {
+        std::iter::once('…')
+            .chain(text.chars().skip(count - limit + 1))
+            .collect()
     }
 }
 
@@ -930,7 +1193,7 @@ fn menu_line(
 }
 
 /// Returns a bordered block for a dialog.
-fn dialog_block(title: &'static str) -> Block<'static> {
+fn dialog_block(title: String) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(CYAN))
@@ -955,20 +1218,48 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 /// Draws a text prompt over the hub.
 fn render_input(frame: &mut Frame, prompt: Prompt, text: &str) {
     let (title, help) = match prompt {
-        Prompt::ImgurClientId => (
-            " Imgur client ID ",
-            [
-                "Register an application at",
-                "api.imgur.com/oauth2/addclient",
-                "and paste its client ID here.",
-            ],
+        Prompt::Key(preset) => (
+            format!(" {} {} ", preset.name, preset.key_label.unwrap_or("key")),
+            ["Get it at", preset.key_source, "and paste it here."],
         ),
         Prompt::ImportPath => (
-            " Import a .sxcu file ",
+            " Import a .sxcu file ".to_owned(),
             [
                 "Paste the path of a ShareX custom",
                 "uploader file. A copy goes into the",
                 "uploaders folder.",
+            ],
+        ),
+        Prompt::Folder => (
+            " Screenshots folder ".to_owned(),
+            [
+                "New screenshots go to this folder.",
+                "The folder is created when it does",
+                "not exist.",
+            ],
+        ),
+        Prompt::Delay => (
+            " Delay ".to_owned(),
+            [
+                "Seconds that a delayed capture waits",
+                "before it reads the screen.",
+                "",
+            ],
+        ),
+        Prompt::Interval => (
+            " Auto capture interval ".to_owned(),
+            [
+                "Seconds between two auto captures.",
+                "A running auto capture uses the new",
+                "value after it is turned on again.",
+            ],
+        ),
+        Prompt::SdrWhite => (
+            " SDR white level ".to_owned(),
+            [
+                "Brightness of SDR white on an HDR",
+                "monitor in nits. Leave the field",
+                "empty to use the Windows value.",
             ],
         ),
     };
@@ -1031,7 +1322,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
-    use crate::screenshot::{MonitorChoice, ScreenshotSummary, upload::Uploader};
+    use crate::screenshot::{ScreenshotSummary, upload::Uploader};
 
     /// Records requests in place of the capture thread.
     struct FakeHub {
@@ -1054,12 +1345,15 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let (sender, events) = unbounded();
         let settings = Arc::new(HubSettings {
-            directory: folder.path().to_path_buf(),
-            monitor: MonitorChoice::Pointer,
-            sdr_white_nits: None,
+            options: Mutex::new(CaptureOptions {
+                directory: folder.path().to_path_buf(),
+                monitor: MonitorChoice::Pointer,
+                sdr_white_nits: None,
+                auto_interval: Duration::from_secs(5),
+                delay: Duration::from_secs(3),
+            }),
             copy: AtomicBool::new(true),
             save: AtomicBool::new(true),
-            auto_interval: Duration::from_secs(5),
             uploader: Mutex::new(uploader),
             upload: AtomicBool::new(false),
         });
@@ -1116,7 +1410,7 @@ mod tests {
     #[test]
     fn a_short_terminal_keeps_the_cursor_row_visible() {
         let (mut app, _sender, _folder) = app(None);
-        for _ in 0..15 {
+        for _ in 0..16 {
             app.on_key(KeyCode::Down);
         }
         assert_eq!(ROWS[app.cursor], Row::Item(MenuItem::Quit));
@@ -1205,6 +1499,10 @@ mod tests {
             "Upload destination",
             "▌ Off",
             "Imgur",
+            "ImgBB",
+            "Catbox",
+            "no account",
+            "Litterbox",
             "Import a .sxcu file",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in\n{text}");
@@ -1230,7 +1528,7 @@ mod tests {
     #[test]
     fn a_prompt_collects_text_and_escape_returns_to_the_list() {
         let (mut app, _sender, _folder) = app(None);
-        app.ask(Prompt::ImportPath);
+        app.ask(Prompt::ImportPath, String::new());
         for character in "C:\\x.sxcu".chars() {
             app.on_key(KeyCode::Char(character));
         }
@@ -1244,7 +1542,7 @@ mod tests {
     #[test]
     fn a_bad_import_path_keeps_the_prompt_open_and_reports_the_reason() {
         let (mut app, _sender, folder) = app(None);
-        app.ask(Prompt::ImportPath);
+        app.ask(Prompt::ImportPath, String::new());
         let missing = folder.path().join("missing.sxcu");
         for character in missing.to_string_lossy().chars() {
             app.on_key(KeyCode::Char(character));
@@ -1256,6 +1554,98 @@ mod tests {
             "{}",
             app.status
         );
+    }
+
+    #[test]
+    fn a_destination_without_a_key_is_selected_at_once() {
+        let (mut app, _sender, _folder) = app(None);
+        app.on_key(KeyCode::Char('p'));
+        for _ in 0..3 {
+            app.on_key(KeyCode::Down);
+        }
+        app.on_key(KeyCode::Enter);
+        assert_eq!(app.dialog, Dialog::None);
+        assert_eq!(app.status, "Uploads go to Catbox");
+        assert!(app.settings.upload.load(Ordering::Relaxed));
+        let text = screen(&mut app, 110, 30);
+        assert!(text.contains("Destination: Catbox"), "{text}");
+    }
+
+    #[test]
+    fn the_settings_menu_changes_the_capture_defaults() {
+        let (mut app, _sender, folder) = app(None);
+        app.on_key(KeyCode::Char('s'));
+        let text = screen(&mut app, 110, 30);
+        for expected in [
+            "Settings",
+            "▌ Screenshots folder",
+            "Delay of delayed captures",
+            "3 s",
+            "Auto capture interval",
+            "under the pointer",
+            "from Windows",
+            "○ Start in the tray at sign-in",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in\n{text}");
+        }
+        // Delay: the prompt starts with the current value.
+        app.on_key(KeyCode::Down);
+        app.on_key(KeyCode::Enter);
+        assert_eq!(
+            app.dialog,
+            Dialog::Input {
+                prompt: Prompt::Delay,
+                text: "3".to_owned()
+            }
+        );
+        app.on_key(KeyCode::Backspace);
+        for character in "1.5".chars() {
+            app.on_key(KeyCode::Char(character));
+        }
+        app.on_key(KeyCode::Enter);
+        assert_eq!(app.dialog, Dialog::Settings { cursor: 1 });
+        assert_eq!(app.settings.options().delay, Duration::from_millis(1_500));
+        // Monitor: Enter switches the value.
+        app.on_key(KeyCode::Down);
+        app.on_key(KeyCode::Down);
+        app.on_key(KeyCode::Enter);
+        assert_eq!(app.settings.options().monitor, MonitorChoice::Primary);
+        // A bad value keeps the prompt open.
+        app.on_key(KeyCode::Down);
+        app.on_key(KeyCode::Enter);
+        app.on_key(KeyCode::Char('5'));
+        app.on_key(KeyCode::Enter);
+        assert!(matches!(
+            app.dialog,
+            Dialog::Input {
+                prompt: Prompt::SdrWhite,
+                ..
+            }
+        ));
+        assert!(app.failed);
+        app.on_key(KeyCode::Esc);
+        assert_eq!(app.dialog, Dialog::Settings { cursor: 4 });
+        // Folder: the history follows the new folder.
+        let other = folder.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(other.join("a.png"), b"x").unwrap();
+        app.dialog = Dialog::Input {
+            prompt: Prompt::Folder,
+            text: other.display().to_string(),
+        };
+        app.on_key(KeyCode::Enter);
+        assert_eq!(app.settings.options().directory, other);
+        assert_eq!(app.history.len(), 1);
+        app.on_key(KeyCode::Esc);
+        assert_eq!(app.dialog, Dialog::None);
+        let text = screen(&mut app, 110, 30);
+        assert!(text.contains("Region in 1.5 seconds"), "{text}");
+    }
+
+    #[test]
+    fn long_paths_keep_their_end() {
+        assert_eq!(tail("short", 10), "short");
+        assert_eq!(tail("C:/Users/someone/Pictures", 10), "…/Pictures");
     }
 
     #[test]

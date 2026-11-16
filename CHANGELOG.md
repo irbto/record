@@ -21,6 +21,12 @@ This file gives the important project changes. The project uses [Semantic Versio
   built-in Imgur destination.
 - The hub selects and configures upload destinations, asks for the Imgur
   client ID, imports `.sxcu` files, and remembers the after-capture switches.
+- The hub has a settings menu for the screenshots folder, the capture delay,
+  the auto capture interval, the monitor, the SDR white level, and a start at
+  sign-in. Direct capture and the tray process use the stored values.
+- ImgBB, Catbox, and Litterbox are built-in upload destinations.
+- The region overlay toolbar uses icons with tips, round color swatches, and
+  a stroke size preview. It shrinks to fit a narrow screen.
 - Screenshots of HDR monitors read the scRGB desktop surface and map it to
   sRGB with the SDR white level of the monitor, so the picture is not bright
   and washed out.
