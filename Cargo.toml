@@ -1,12 +1,29 @@
-[package]
-name = "record-tui"
+[workspace]
+members = ["crates/record-core"]
+resolver = "3"
+
+[workspace.package]
 version = "0.3.3"
 edition = "2024"
 rust-version = "1.90"
-description = "One-command Windows system-audio MP3 recording and DXGI screen capture to H.264/AAC MP4"
 repository = "https://github.com/irbto/record"
-homepage = "https://github.com/irbto/record"
 license = "MIT"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+
+[package]
+name = "record-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "One-command Windows system-audio MP3 recording and DXGI screen capture to H.264/AAC MP4"
+repository.workspace = true
+homepage = "https://github.com/irbto/record"
+license.workspace = true
 keywords = ["audio", "recording", "terminal", "wasapi", "mp3", "screen-capture", "mp4", "h264"]
 categories = ["command-line-utilities", "multimedia::audio"]
 readme = "README.md"
@@ -24,39 +41,7 @@ ctrlc = "3.5.2"
 image = { version = "0.25.6", default-features = false, features = ["png"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
 ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
-rustfft = "6.4.1"
-
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62.2", features = [
-    "Win32_Devices_Display",
-    "Win32_Foundation",
-    "Win32_Graphics_Direct3D",
-    "Win32_Graphics_Dxgi_Common",
-    "Win32_Graphics_Direct3D11",
-    "Win32_Graphics_Dwm",
-    "Win32_Graphics_Dxgi",
-    "Win32_Graphics_Gdi",
-    "Win32_Media_Audio",
-    "Win32_Media_KernelStreaming",
-    "Win32_Media_MediaFoundation",
-    "Win32_Media_Multimedia",
-    "Win32_Networking_WinHttp",
-    "Win32_Security",
-    "Win32_Storage_FileSystem",
-    "Win32_System_Com",
-    "Win32_System_Com_StructuredStorage",
-    "Win32_System_DataExchange",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Memory",
-    "Win32_System_SystemInformation",
-    "Win32_System_Threading",
-    "Win32_System_Variant",
-    "Win32_UI_HiDpi",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_Shell",
-    "Win32_UI_WindowsAndMessaging",
-] }
-windows-core = "0.62.2"
+record-core = { path = "crates/record-core" }
 
 [dev-dependencies]
 tempfile = "3.23.0"
@@ -66,8 +51,5 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
-[lints.rust]
-unsafe_op_in_unsafe_fn = "deny"
-
-[lints.clippy]
-all = { level = "deny", priority = -1 }
+[lints]
+workspace = true

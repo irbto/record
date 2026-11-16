@@ -1,5 +1,16 @@
 # Architecture
 
+## Crates
+
+The repository is a Cargo workspace.
+
+| Crate | Path | Contents |
+|---|---|---|
+| `record-core` | `crates/record-core` | The capture engines: audio, video, screenshots, uploads, stored settings, and the shared color theme. It has no user interface |
+| `record-tui` | the repository root | The `record` executable: command-line parsing and the terminal interface |
+
+A user interface sends requests to an engine and draws the events that come back. It does not own capture state. This rule lets the terminal program and the desktop program use the same engines.
+
 `record` uses native Windows audio components. The audio worker and terminal renderer use separate data paths.
 
 ```text

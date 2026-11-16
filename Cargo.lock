@@ -1066,6 +1066,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "record-core"
+version = "0.3.3"
+dependencies = [
+ "anyhow",
+ "crossbeam-channel",
+ "image",
+ "rustfft",
+ "tempfile",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
+]
+
+[[package]]
 name = "record-tui"
 version = "0.3.3"
 dependencies = [
@@ -1077,10 +1090,8 @@ dependencies = [
  "image",
  "ratatui",
  "ratatui-image",
- "rustfft",
+ "record-core",
  "tempfile",
- "windows 0.62.2",
- "windows-core 0.62.2",
 ]
 
 [[package]]

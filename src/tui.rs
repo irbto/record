@@ -11,6 +11,8 @@
 //! Preview pauses capture so the recorder does not capture its own playback.
 
 mod audio;
+/// The screenshot hub.
+pub mod screenshot;
 mod utils;
 mod video;
 
@@ -23,6 +25,7 @@ use std::{
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
 use ratatui::style::Color;
+use record_core::theme;
 
 use crate::{
     audio::{AudioCommand, AudioEvent, RecordingSummary},
@@ -30,13 +33,20 @@ use crate::{
     video::{VideoEvent, VideoSummary, preview::PreviewFrame},
 };
 
-pub(crate) const CYAN: Color = Color::Rgb(65, 214, 224);
-pub(crate) const GREEN: Color = Color::Rgb(72, 214, 147);
-pub(crate) const RED: Color = Color::Rgb(247, 75, 103);
-pub(crate) const AMBER: Color = Color::Rgb(244, 183, 73);
-pub(crate) const PURPLE: Color = Color::Rgb(172, 122, 255);
-pub(crate) const MUTED: Color = Color::Rgb(126, 139, 158);
-pub(crate) const BORDER: Color = Color::Rgb(55, 65, 82);
+/// Converts a shared theme color to the terminal color type.
+const fn color(rgb: theme::Rgb) -> Color {
+    Color::Rgb(rgb.0, rgb.1, rgb.2)
+}
+
+pub(crate) const CYAN: Color = color(theme::CYAN);
+pub(crate) const GREEN: Color = color(theme::GREEN);
+pub(crate) const RED: Color = color(theme::RED);
+pub(crate) const AMBER: Color = color(theme::AMBER);
+pub(crate) const PURPLE: Color = color(theme::PURPLE);
+pub(crate) const MUTED: Color = color(theme::MUTED);
+pub(crate) const BORDER: Color = color(theme::BORDER);
+pub(crate) const TEXT: Color = color(theme::TEXT);
+pub(crate) const SELECTED: Color = color(theme::SELECTED);
 
 #[derive(Clone, Copy, Debug, Default)]
 /// Describes the recorder state shown in the header.

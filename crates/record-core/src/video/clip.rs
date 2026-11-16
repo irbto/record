@@ -32,7 +32,7 @@ use reader::ClipReader;
 
 /// Describes the current stage of rebuilding and replacing a trimmed video.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) enum TrimProgress {
+pub enum TrimProgress {
     /// The source reader, destination writer, and temporary output are being prepared.
     Preparing,
     /// Decoded video frames are being written to the trimmed output.
@@ -88,7 +88,7 @@ pub(crate) fn trim_video_with_progress(
 }
 
 /// Re-encodes one edited frame range while reporting each replacement stage.
-pub(crate) fn trim_video_with_settings_and_progress(
+pub fn trim_video_with_settings_and_progress(
     path: &Path,
     summary: &VideoSummary,
     start_frame: u64,

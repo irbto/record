@@ -51,7 +51,7 @@ impl Default for SavedSettings {
 }
 
 /// Parses a number of seconds inside the range that the hub accepts.
-pub(crate) fn parse_seconds(text: &str) -> Result<f32, String> {
+pub fn parse_seconds(text: &str) -> Result<f32, String> {
     match text.trim().parse::<f32>() {
         Ok(seconds) if (0.25..=3_600.0).contains(&seconds) => Ok(seconds),
         _ => Err("enter a number of seconds from 0.25 to 3600".to_owned()),
@@ -59,7 +59,7 @@ pub(crate) fn parse_seconds(text: &str) -> Result<f32, String> {
 }
 
 /// Parses an SDR white level. An empty text selects the Windows value.
-pub(crate) fn parse_sdr_white(text: &str) -> Result<Option<f32>, String> {
+pub fn parse_sdr_white(text: &str) -> Result<Option<f32>, String> {
     let text = text.trim();
     if text.is_empty() || text.eq_ignore_ascii_case("auto") {
         return Ok(None);

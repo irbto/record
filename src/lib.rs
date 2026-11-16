@@ -1,4 +1,4 @@
-//! Core types and terminal components for the `record` executable.
+//! Terminal components and command-line parsing for the `record` executable.
 //!
 //! The crate separates Windows audio capture from the terminal interface. The
 //! [`audio`] module owns the cross-thread contract. The [`session`] module owns
@@ -9,22 +9,12 @@
 //! stay off that worker so a slow terminal cannot delay MP3 encoding.
 #![warn(missing_docs)]
 
-/// Audio capture commands, events, and platform entry points.
-pub mod audio;
+// The engines live in `record-core`. These names keep the paths that the
+// terminal code and the executable already use.
+pub use record_core::{audio, clip, screenshot, session, spectrum, video, waveform};
+
 /// Command-line arguments and defaults.
 pub mod cli;
-/// Named clip selection, preview, and trimming.
-pub mod clip;
 pub(crate) mod raster;
-/// HDR-aware screen capture with an on-screen annotation overlay.
-pub mod screenshot;
-/// Session directory, part, and clip naming rules.
-pub mod session;
-/// Bounded FFT data for the spectrum display.
-pub mod spectrum;
 /// Ratatui application state and rendering.
 pub mod tui;
-/// Screen and system-audio video capture to MP4.
-pub mod video;
-/// Rolling stereo sample history for live scopes and meters.
-pub mod waveform;

@@ -40,7 +40,7 @@ const CANCELLATION_CHECK_FRAMES: usize = 4_096;
 
 /// Result of attempting to summarize the audio stream in one MP4.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) enum WaveformLoad {
+pub enum WaveformLoad {
     /// A normalized full-duration envelope is ready for rendering.
     Ready(Vec<WaveformBin>),
     /// The MP4 has no usable decoded audio samples.
@@ -56,7 +56,7 @@ pub(crate) enum WaveformLoad {
 /// remain zeroed, and an MP4 without an audio stream returns
 /// [`WaveformLoad::Unavailable`]. Cancellation is checked between decoded
 /// samples and periodically within larger PCM blocks.
-pub(crate) fn load_mp4_waveform(
+pub fn load_mp4_waveform(
     path: &Path,
     maximum_bins: usize,
     cancelled: &AtomicBool,

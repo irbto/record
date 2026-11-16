@@ -24,7 +24,7 @@ use ratatui::{
 };
 use ratatui_image::{Image, Resize, picker::Picker, protocol::Protocol};
 
-use super::{
+use record_core::screenshot::{
     CaptureMode, MonitorChoice,
     events::{CaptureHub, CaptureOptions, HubEvent, HubRequest, HubSettings},
     history::{HistoryEntry, list_history},
@@ -34,15 +34,11 @@ use super::{
         set_default_destination,
     },
 };
-use crate::tui::{AMBER, BORDER, CYAN, GREEN, MUTED, RED};
+
+use super::{AMBER, BORDER, CYAN, GREEN, MUTED, RED, SELECTED, TEXT};
 
 /// Width of the menu column in terminal cells.
 const MENU_WIDTH: u16 = 40;
-/// Background of the selected row.
-const SELECTED: Color = Color::Rgb(30, 41, 59);
-/// Bright text color.
-const TEXT: Color = Color::Rgb(226, 232, 240);
-
 /// One selectable menu entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MenuItem {
@@ -206,7 +202,7 @@ struct App<H: CaptureHub> {
 /// Runs the hub until the user quits.
 #[cfg(windows)]
 pub fn run(settings: Arc<HubSettings>) -> Result<()> {
-    let hub = super::hub::Hub::start(Arc::clone(&settings))?;
+    let hub = record_core::screenshot::hub::Hub::start(Arc::clone(&settings))?;
     let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
     let mut app = App::new(settings, hub, picker);
     ratatui::run(|terminal| app.run(terminal))
@@ -1301,7 +1297,7 @@ fn age_text(now: SystemTime, modified: SystemTime) -> String {
 /// Places a saved image on the clipboard.
 fn copy_image(path: &Path) -> Result<()> {
     #[cfg(windows)]
-    return super::copy_file_to_clipboard(path);
+    return record_core::screenshot::copy_file_to_clipboard(path);
     #[cfg(not(windows))]
     anyhow::bail!("{} cannot be copied on this platform", path.display())
 }
@@ -1322,7 +1318,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
-    use crate::screenshot::{ScreenshotSummary, upload::Uploader};
+    use record_core::screenshot::{ScreenshotSummary, upload::Uploader};
 
     /// Records requests in place of the capture thread.
     struct FakeHub {
@@ -1456,7 +1452,7 @@ mod tests {
             hdr: true,
             sdr_white_nits: 240.0,
         };
-        let link = crate::screenshot::upload::UploadResult {
+        let link = record_core::screenshot::upload::UploadResult {
             url: "https://i.example.com/a.png".to_owned(),
             deletion_url: None,
         };

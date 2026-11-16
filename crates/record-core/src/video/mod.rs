@@ -79,7 +79,7 @@ pub mod audio_preview;
 pub mod edit;
 
 /// Bounded audio waveform summaries for the integrated video editor.
-pub(crate) mod waveform;
+pub mod waveform;
 
 /// Frame-accurate MP4 replacement for the integrated video editor.
 pub mod clip;

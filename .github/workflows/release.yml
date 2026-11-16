@@ -63,7 +63,7 @@ jobs:
         run: rustup toolchain install stable --profile minimal
       - name: Test
         if: steps.release.outputs.exists != 'true'
-        run: cargo test --locked --all-targets
+        run: cargo test --locked --workspace --all-targets
       - name: Build
         if: steps.release.outputs.exists != 'true'
         run: cargo build --locked --release

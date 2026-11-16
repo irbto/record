@@ -36,13 +36,13 @@ jobs:
             throw "Project text must not contain en dashes or em dashes."
           }
       - name: Lint
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
-        run: cargo test --all-targets
+        run: cargo test --workspace --all-targets
       - name: Documentation
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --no-deps --document-private-items
+        run: cargo doc --workspace --no-deps --document-private-items
       - name: Validate PowerShell scripts
         shell: pwsh
         run: |
@@ -61,7 +61,7 @@ jobs:
       - name: Install MSRV
         run: rustup toolchain install 1.90.0 --profile minimal
       - name: Check minimum supported Rust
-        run: cargo +1.90.0 check --all-targets
+        run: cargo +1.90.0 check --workspace --all-targets
 
   release-tag:
     name: Tag release

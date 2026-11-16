@@ -1,8 +1,6 @@
 //! HDR-aware screenshots with an on-screen annotation overlay.
 //!
-//! `record screenshot` opens a terminal hub with a capture menu, global
-//! hotkeys, and a history of saved files. A capture copies the desktop from
-//! the GPU. Region capture freezes one monitor in a borderless window and
+//! A capture copies the desktop from the GPU. Region capture freezes one monitor in a borderless window and
 //! lets the user select a region and draw on the frozen image. That overlay is
 //! a native window because a terminal cannot draw over the desktop.
 //!
@@ -36,8 +34,6 @@ mod icons;
 mod overlay;
 /// Stored defaults of the hub.
 pub mod saved;
-/// The terminal hub.
-pub mod ui;
 /// Upload destinations in the ShareX custom uploader format.
 pub mod upload;
 

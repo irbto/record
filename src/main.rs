@@ -34,7 +34,7 @@ use record_tui::{
         events::{CaptureOptions, HubSettings},
         hub::{run_tray, tray_is_running},
         saved::SavedSettings,
-        take_screenshot, ui, unique_output_path,
+        take_screenshot, unique_output_path,
         upload::{default_destination, resolve_destination},
     },
     session::{OutputTarget, create_session_directory, mp3_output_path},
@@ -497,7 +497,7 @@ fn run_screenshot(cli: Cli) -> Result<()> {
         if !(io::stdout().is_terminal() && io::stdin().is_terminal()) {
             bail!("the screenshot hub needs a terminal; pass a mode such as full or region");
         }
-        return ui::run(settings);
+        return record_tui::tui::screenshot::run(settings);
     };
 
     if tray {
@@ -829,14 +829,7 @@ fn output_target(
 #[cfg(windows)]
 /// Returns a local wall-clock timestamp for default session names.
 fn local_timestamp() -> String {
-    use windows::Win32::System::SystemInformation::GetLocalTime;
-
-    // SAFETY: GetLocalTime has no preconditions and returns the value by copy.
-    let time = unsafe { GetLocalTime() };
-    format!(
-        "{:04}{:02}{:02}-{:02}{:02}{:02}",
-        time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond
-    )
+    video_timestamp()
 }
 
 #[cfg(not(windows))]
