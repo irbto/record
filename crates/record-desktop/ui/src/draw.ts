@@ -312,6 +312,7 @@ export function lanes(
   start: number,
   end: number,
   play: number | null,
+  ramps: { from: number; to: number; color: string; top: boolean; held: boolean }[] = [],
 ): void {
   const [g, width, height] = fit(canvas);
   const band = height / Math.max(1, waves.length);
@@ -347,10 +348,31 @@ export function lanes(
     g.fillRect(Math.round(x) - 1, 0, 2, height);
     g.fillRect(direction === 1 ? Math.round(x) : Math.round(x) - 7, 0, 7, 12);
   }
+  // A fade is a slope from one end of the range to its handle.
+  for (const ramp of ramps) {
+    const [low, high] = ramp.top ? [height / 2 - 2, 3] : [height / 2 + 2, height - 3];
+    g.strokeStyle = ramp.color;
+    g.fillStyle = ramp.color;
+    g.lineWidth = 1.5;
+    g.globalAlpha = ramp.held ? 1 : 0.55;
+    g.beginPath();
+    g.moveTo(ramp.from * width, low);
+    g.lineTo(ramp.to * width, high);
+    g.stroke();
+    if (ramp.held) g.fillRect(ramp.to * width - 4, high - (ramp.top ? 0 : 8), 8, 8);
+    g.globalAlpha = 1;
+  }
   if (play !== null) {
     g.fillStyle = token("--red");
     g.fillRect(Math.round(play * width), 0, 1, height);
   }
+}
+
+/** Returns where `contain` draws a picture of this size on a canvas. */
+export function pictureBox(canvas: HTMLCanvasElement, pictureWidth: number, pictureHeight: number): { x: number; y: number; scale: number } {
+  const box = canvas.getBoundingClientRect();
+  const scale = Math.min(box.width / Math.max(1, pictureWidth), box.height / Math.max(1, pictureHeight));
+  return { x: (box.width - pictureWidth * scale) / 2, y: (box.height - pictureHeight * scale) / 2, scale };
 }
 
 /** Dims the margins that a crop removes from the picture drawn by `contain`. */
@@ -359,6 +381,7 @@ export function cropShade(
   pictureWidth: number,
   pictureHeight: number,
   crop: { left: number; right: number; top: number; bottom: number },
+  handles = false,
 ): void {
   if (!pictureWidth || !pictureHeight) return;
   const box = canvas.getBoundingClientRect();
@@ -374,9 +397,19 @@ export function cropShade(
   g.fillRect(x + width - right, y, right, height);
   g.fillRect(x + left, y, Math.max(0, width - left - right), top);
   g.fillRect(x + left, y + height - bottom, Math.max(0, width - left - right), bottom);
-  if (left + right + top + bottom > 0) {
+  const [boxWidth, boxHeight] = [Math.max(0, width - left - right), Math.max(0, height - top - bottom)];
+  if (left + right + top + bottom > 0 || handles) {
     g.strokeStyle = token("--text");
     g.lineWidth = 1;
-    g.strokeRect(x + left + 0.5, y + top + 0.5, Math.max(0, width - left - right - 1), Math.max(0, height - top - bottom - 1));
+    g.strokeRect(x + left + 0.5, y + top + 0.5, Math.max(0, boxWidth - 1), Math.max(0, boxHeight - 1));
+  }
+  if (!handles) return;
+  // Eight handles: the corners and the middle of each edge.
+  g.fillStyle = token("--text");
+  for (const column of [0, 0.5, 1]) {
+    for (const line of [0, 0.5, 1]) {
+      if (column === 0.5 && line === 0.5) continue;
+      g.fillRect(x + left + boxWidth * column - 4, y + top + boxHeight * line - 4, 8, 8);
+    }
   }
 }

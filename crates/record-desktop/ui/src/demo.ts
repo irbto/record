@@ -15,9 +15,9 @@ function stamp(): string {
 }
 
 const folders: Record<Mode, string> = {
-  audio: "C:\\Users\\marcu\\Music\\record",
-  video: "C:\\Users\\marcu\\Videos\\record",
-  screenshot: "C:\\Users\\marcu\\Pictures\\Screenshots",
+  audio: "C:\\Users\\you\\Music\\record",
+  video: "C:\\Users\\you\\Videos\\record",
+  screenshot: "C:\\Users\\you\\Pictures\\Screenshots",
 };
 
 function entry(mode: Mode, name: string, ageSeconds: number): FileEntry {

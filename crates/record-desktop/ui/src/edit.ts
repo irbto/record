@@ -157,8 +157,13 @@ export async function openClipEditor(save: Save): Promise<void> {
 
 // ---- Video. ----
 
+type Tool = "range" | "videoFade" | "audioFade" | "crop";
+const tools: [Tool, string][] = [["range", "Range"], ["videoFade", "Video fade"], ["audioFade", "Audio fade"], ["crop", "Crop"]];
+
 interface VideoState {
   info: VideoInfo;
+  /** What the mouse changes: on the timeline, or on the picture for a crop. */
+  tool: Tool;
   start: number;
   end: number;
   playhead: number;
@@ -181,6 +186,7 @@ export function videoEditorOpen(): boolean {
 function fresh(info: VideoInfo): VideoState {
   return {
     info,
+    tool: "range",
     start: 0,
     end: info.frames,
     playhead: 0,
@@ -234,16 +240,60 @@ function paintVideo(): void {
   draw.contain(canvas, state.picture, state.picture?.width ?? 0, state.picture?.height ?? 0);
   // The picture is smaller than the video, so the crop scales with it.
   const scale = state.picture ? state.picture.width / state.info.width : 0;
-  draw.cropShade(canvas, state.picture?.width ?? 0, state.picture?.height ?? 0, {
-    left: state.crop.left * scale,
-    right: state.crop.right * scale,
-    top: state.crop.top * scale,
-    bottom: state.crop.bottom * scale,
-  });
+  draw.cropShade(
+    canvas,
+    state.picture?.width ?? 0,
+    state.picture?.height ?? 0,
+    { left: state.crop.left * scale, right: state.crop.right * scale, top: state.crop.top * scale, bottom: state.crop.bottom * scale },
+    state.tool === "crop",
+  );
+  canvas.style.cursor = state.tool === "crop" ? "move" : "";
   const frames = Math.max(1, state.info.frames);
-  draw.lanes($<HTMLCanvasElement>("editor-timeline"), [{ bins: state.bins, color: draw.token("--purple") }], state.start / frames, state.end / frames, state.playhead / frames);
+  const [first, last] = [state.start / frames, state.end / frames];
   const fps = state.info.fps;
+  const { fades } = state;
+  const ramp = (seconds: number, rising: boolean, color: string, top: boolean, tool: Tool) => ({
+    from: rising ? first : last,
+    to: rising ? first + (seconds * fps) / frames : last - (seconds * fps) / frames,
+    color,
+    top,
+    held: state.tool === tool,
+  });
+  draw.lanes($<HTMLCanvasElement>("editor-timeline"), [{ bins: state.bins, color: draw.token("--purple") }], first, last, state.playhead / frames, [
+    ramp(fades.videoIn, true, draw.token("--green"), true, "videoFade"),
+    ramp(fades.videoOut, false, draw.token("--green"), true, "videoFade"),
+    ramp(fades.audioIn, true, draw.token("--amber"), false, "audioFade"),
+    ramp(fades.audioOut, false, draw.token("--amber"), false, "audioFade"),
+  ]);
+  syncFields();
   $("editor-range").textContent = `Range · ${stamp(state.start / fps)} to ${stamp(state.end / fps)} · ${stamp((state.end - state.start) / fps)}`;
+}
+
+/** The fields of the side panel and the value each one shows. */
+function fieldValues(state: VideoState): [string, number][] {
+  const { fades, crop } = state;
+  return [
+    ["Video fade in (s)", fades.videoIn],
+    ["Video fade out (s)", fades.videoOut],
+    ["Audio fade in (s)", fades.audioIn],
+    ["Audio fade out (s)", fades.audioOut],
+    ["Crop left (px)", crop.left],
+    ["Crop right (px)", crop.right],
+    ["Crop top (px)", crop.top],
+    ["Crop bottom (px)", crop.bottom],
+  ];
+}
+
+const fieldId = (label: string) => `edit-${label.toLowerCase().replace(/[^a-z]+/g, "-")}`;
+
+/** Shows in the fields what the mouse changed. */
+function syncFields(): void {
+  if (!video) return;
+  for (const [label, value] of fieldValues(video)) {
+    const input = document.getElementById(fieldId(label)) as HTMLInputElement | null;
+    const text = String(Number(value.toFixed(2)));
+    if (input && document.activeElement !== input && input.value !== text) input.value = text;
+  }
 }
 
 function renderVideoEditor(): void {
@@ -257,7 +307,13 @@ function renderVideoEditor(): void {
     element.addEventListener("click", action);
     return element;
   };
+  const tool = h("select", { id: "editor-tool", className: "tool", disabled: busy, title: "Tool" }, ...tools.map(([value, label]) => h("option", { value, textContent: label, selected: value === state.tool })));
+  tool.addEventListener("change", () => {
+    state.tool = tool.value as Tool;
+    paintVideo();
+  });
   $("editor-bar").replaceChildren(
+    tool,
     h("span", { className: "clock", textContent: info.name }),
     h("span", { className: "facts", textContent: busy ? state.exporting : `${info.width}x${info.height} ${info.fps} fps ${stamp(info.frames / info.fps)}` }),
     h("span", { className: "spacer" }),
@@ -265,7 +321,7 @@ function renderVideoEditor(): void {
     button("edit-reset", "", "Reset", !busy, () => {
       const bins = state.bins;
       const picture = state.picture;
-      video = { ...fresh(info), bins, picture, wanted: null };
+      video = { ...fresh(info), tool: state.tool, bins, picture, wanted: null };
       renderVideoEditor();
     }),
     button("edit-reveal", "", "Show in folder", true, () => void bridge.reveal(info.path).catch(host.fail)),
@@ -275,7 +331,7 @@ function renderVideoEditor(): void {
   const fields = $("editor-fields");
   fields.replaceChildren();
   const field = (label: string, value: number, limit: number, step: number, set: (value: number) => void) => {
-    const input = h("input", { type: "text", value: String(value), spellcheck: false, disabled: busy, id: `edit-${label.toLowerCase().replace(/[^a-z]+/g, "-")}` });
+    const input = h("input", { type: "text", value: String(value), spellcheck: false, disabled: busy, id: fieldId(label) });
     input.addEventListener("change", () => {
       const typed = Number(input.value);
       const safe = Number.isFinite(typed) ? Math.min(limit, Math.max(0, Math.round(typed / step) * step)) : 0;
@@ -286,16 +342,16 @@ function renderVideoEditor(): void {
     fields.append(h("div", { className: "field" }, h("label", { htmlFor: input.id, textContent: label }), input));
   };
   const seconds = (state.end - state.start) / info.fps;
-  const { fades, crop } = state;
+  const { fades } = state;
   field("Video fade in (s)", fades.videoIn, seconds, 0.1, (value) => (fades.videoIn = value));
   field("Video fade out (s)", fades.videoOut, seconds, 0.1, (value) => (fades.videoOut = value));
   field("Audio fade in (s)", fades.audioIn, seconds, 0.1, (value) => (fades.audioIn = value));
   field("Audio fade out (s)", fades.audioOut, seconds, 0.1, (value) => (fades.audioOut = value));
   // The encoder takes even numbers of pixels.
-  field("Crop left (px)", crop.left, info.width - 16, 2, (value) => (crop.left = value));
-  field("Crop right (px)", crop.right, info.width - 16, 2, (value) => (crop.right = value));
-  field("Crop top (px)", crop.top, info.height - 16, 2, (value) => (crop.top = value));
-  field("Crop bottom (px)", crop.bottom, info.height - 16, 2, (value) => (crop.bottom = value));
+  field("Crop left (px)", state.crop.left, info.width - 16, 2, (value) => (state.crop.left = value));
+  field("Crop right (px)", state.crop.right, info.width - 16, 2, (value) => (state.crop.right = value));
+  field("Crop top (px)", state.crop.top, info.height - 16, 2, (value) => (state.crop.top = value));
+  field("Crop bottom (px)", state.crop.bottom, info.height - 16, 2, (value) => (state.crop.bottom = value));
   paintVideo();
 }
 
@@ -360,6 +416,66 @@ async function loadWaveform(): Promise<void> {
   }
 }
 
+/**
+ * Lets the pointer change the crop on the picture: a corner or an edge moves
+ * that side, and a press inside the frame moves the whole frame.
+ */
+function setupCrop(canvas: HTMLCanvasElement): void {
+  type Sides = { left: boolean; right: boolean; top: boolean; bottom: boolean };
+  let held: { sides: Sides; x: number; y: number; crop: VideoState["crop"] } | null = null;
+  const place = (event: PointerEvent, state: VideoState) => {
+    const box = canvas.getBoundingClientRect();
+    const picture = state.picture;
+    const drawn = draw.pictureBox(canvas, picture?.width ?? 1, picture?.height ?? 1);
+    // One pixel of the video on the screen.
+    const scale = (drawn.scale * (picture?.width ?? 1)) / state.info.width;
+    return { x: (event.clientX - box.left - drawn.x) / scale, y: (event.clientY - box.top - drawn.y) / scale, reach: 10 / scale };
+  };
+  canvas.addEventListener("pointerdown", (event) => {
+    const state = video;
+    if (!state || state.tool !== "crop" || state.exporting || !state.picture) return;
+    const { x, y, reach } = place(event, state);
+    const { crop, info } = state;
+    const near = (value: number, edge: number) => Math.abs(value - edge) <= reach;
+    const sides = { left: near(x, crop.left), right: near(x, info.width - crop.right), top: near(y, crop.top), bottom: near(y, info.height - crop.bottom) };
+    const inside = x > crop.left - reach && x < info.width - crop.right + reach && y > crop.top - reach && y < info.height - crop.bottom + reach;
+    if (!inside) return;
+    held = { sides, x, y, crop: { ...crop } };
+    canvas.setPointerCapture(event.pointerId);
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    const state = video;
+    if (!held || !state) return;
+    const { x, y } = place(event, state);
+    const [dx, dy] = [x - held.x, y - held.y];
+    const { info } = state;
+    const from = held.crop;
+    const even = (value: number) => Math.round(value / 2) * 2;
+    const limit = (value: number, most: number) => even(Math.min(most, Math.max(0, value)));
+    const { sides } = held;
+    const next = { ...from };
+    if (!sides.left && !sides.right && !sides.top && !sides.bottom) {
+      // Move the frame: one margin grows as much as the other shrinks.
+      const shiftX = even(Math.min(from.right, Math.max(-from.left, dx)));
+      const shiftY = even(Math.min(from.bottom, Math.max(-from.top, dy)));
+      Object.assign(next, { left: from.left + shiftX, right: from.right - shiftX, top: from.top + shiftY, bottom: from.bottom - shiftY });
+    } else {
+      // The picture keeps at least 16 pixels in each direction.
+      if (sides.left) next.left = limit(from.left + dx, info.width - from.right - 16);
+      else if (sides.right) next.right = limit(from.right - dx, info.width - from.left - 16);
+      if (sides.top) next.top = limit(from.top + dy, info.height - from.bottom - 16);
+      else if (sides.bottom) next.bottom = limit(from.bottom - dy, info.height - from.top - 16);
+    }
+    state.crop = next;
+    paintVideo();
+  });
+  const release = () => {
+    held = null;
+  };
+  canvas.addEventListener("pointerup", release);
+  canvas.addEventListener("pointercancel", release);
+}
+
 /** Opens one saved video in the editor. */
 export async function openVideoEditor(path: string): Promise<void> {
   try {
@@ -391,13 +507,36 @@ export function setupEditors(context: Host): void {
   host = context;
   host.bridge.on("edit", onEdit);
   host.bridge.on("played", () => played?.());
+  // On the timeline the tool selects what the two handles are: the ends of
+  // the range, or the ends of the two fades.
+  const fadeOf = (state: VideoState): [keyof VideoState["fades"], keyof VideoState["fades"]] | null =>
+    state.tool === "videoFade" ? ["videoIn", "videoOut"] : state.tool === "audioFade" ? ["audioIn", "audioOut"] : null;
   dragRange(
     $<HTMLCanvasElement>("editor-timeline"),
-    () => (video ? [video.start / video.info.frames, video.end / video.info.frames] : [0, 1]),
+    () => {
+      const state = video;
+      if (!state) return [0, 1];
+      const frames = state.info.frames;
+      const fade = fadeOf(state);
+      if (!fade) return [state.start / frames, state.end / frames];
+      const fps = state.info.fps;
+      return [(state.start + state.fades[fade[0]] * fps) / frames, (state.end - state.fades[fade[1]] * fps) / frames];
+    },
     (which, position) => {
       const state = video;
       if (!state || state.exporting) return;
       const frame = Math.round(position * state.info.frames);
+      const fade = fadeOf(state);
+      if (fade) {
+        // The two fades of one kind share the length of the range.
+        const fps = state.info.fps;
+        const length = (state.end - state.start) / fps;
+        const other = state.fades[fade[1 - which]!];
+        const wanted = which === 0 ? (frame - state.start) / fps : (state.end - frame) / fps;
+        state.fades[fade[which]] = Math.round(Math.min(length - other, Math.max(0, wanted)) * 10) / 10;
+        paintVideo();
+        return;
+      }
       if (which === 0) state.start = Math.max(0, Math.min(frame, state.end - 1));
       else state.end = Math.min(state.info.frames, Math.max(frame, state.start + 1));
       // The picture follows the end that moves.
@@ -407,6 +546,7 @@ export function setupEditors(context: Host): void {
       if (video && !video.exporting) seek(position * video.info.frames);
     },
   );
+  setupCrop($<HTMLCanvasElement>("editor-picture"));
   window.addEventListener("resize", paintVideo);
   document.addEventListener("keydown", (event) => {
     const state = video;

@@ -24,7 +24,18 @@ The test used a release build, 3 warmup runs, and 30 measured runs. The test dat
 | Windows 11 Pro N build 26200, Ryzen 5 5600X | Audio capture ready | 26.76 ms | 22.60 ms | 100 ms |
 | Windows 11 Pro N build 26200, Ryzen 5 5600X | CLI process | 12.64 ms | 11.25 ms | 50 ms |
 
-The release executable was 2,447,872 bytes (2.33 MiB). These results apply to the reference computer. Results on other computers can be different.
+The release executable of that test was 2,447,872 bytes (2.33 MiB). These results apply to the reference computer. Results on other computers can be different.
+
+## Executable size
+
+Video capture, screenshots, and the image formats came after the startup test. These are the sizes of a release build for `x86_64-pc-windows-gnu` on 2026-11-16:
+
+| File | Bytes | Size |
+|---|---:|---:|
+| `record.exe` | 5,453,824 | 5.20 MiB |
+| `record-desktop.exe` | 9,821,696 | 9.37 MiB |
+
+`record-desktop.exe` draws its window with the WebView2 of Windows. With the GNU toolchain it also needs the 160 KB `WebView2Loader.dll` beside it.
 
 ## Run the benchmark
 

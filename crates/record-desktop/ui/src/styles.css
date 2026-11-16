@@ -173,6 +173,8 @@ main { min-height: 0; padding: 22px 18px 14px; }
 #editor .timeline { grid-column: 1 / -1; }
 #editor .timeline .body { padding: 14px 10px 8px; }
 #editor-timeline, canvas.wave { cursor: ew-resize; touch-action: none; }
+#editor-picture { touch-action: none; }
+select.tool { width: auto; padding: 3px 10px; border-radius: 5px; font-weight: 700; color: var(--green); border-color: var(--green); }
 canvas.wave { height: 170px; }
 
 /* Rows: one line with a marker, a name, and a value at the right. */
