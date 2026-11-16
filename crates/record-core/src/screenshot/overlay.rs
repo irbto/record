@@ -75,10 +75,24 @@ struct OverlayState {
 /// Returns how the session ended, the final cropped image, and the selection
 /// in monitor pixels.
 pub(crate) fn edit(captured: CapturedMonitor) -> Result<(Outcome, Canvas, Option<Area>)> {
+    edit_selected(captured, None)
+}
+
+/// Opens the overlay with a selection already in place.
+///
+/// A saved image that is opened again starts with itself selected.
+pub(crate) fn edit_selected(
+    captured: CapturedMonitor,
+    selection: Option<Area>,
+) -> Result<(Outcome, Canvas, Option<Area>)> {
     let (width, height) = (captured.image.width(), captured.image.height());
+    let mut editor = Editor::new(captured.image.clone(), captured.scale, Box::new(GdiText));
+    if selection.is_some() {
+        editor.set_selection(selection);
+    }
     let state = Box::new(OverlayState {
-        frame: captured.image.clone(),
-        editor: Editor::new(captured.image, captured.scale, Box::new(GdiText)),
+        frame: captured.image,
+        editor,
         outcome: Outcome::Cancel,
     });
     let state = Box::into_raw(state);
@@ -155,7 +169,7 @@ unsafe fn run_window(
 }
 
 /// Reads the signed pointer position from a mouse message.
-fn pointer_position(lparam: LPARAM) -> Point {
+pub(super) fn pointer_position(lparam: LPARAM) -> Point {
     let x = (lparam.0 & 0xffff) as u16 as i16;
     let y = ((lparam.0 >> 16) & 0xffff) as u16 as i16;
     Point::new(i32::from(x), i32::from(y))
@@ -254,7 +268,7 @@ impl OverlayState {
 }
 
 /// Describes a 32-bit bitmap. A negative height stores the top row first.
-fn bitmap_info(width: i32, height: i32) -> BITMAPINFO {
+pub(super) fn bitmap_info(width: i32, height: i32) -> BITMAPINFO {
     BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,

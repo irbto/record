@@ -23,8 +23,8 @@ use windows::{
 use super::{
     Mp4Writer, Nv12Frame, VideoSummary,
     edit::{
-        FadeEnvelope, ValidatedVideoEditSettings, VideoEditSettings, crop_nv12, fade_nv12,
-        fade_pcm16,
+        FadeEnvelope, ValidatedVideoEditSettings, VideoEditCurves, VideoEditSettings, crop_nv12,
+        fade_nv12, fade_pcm16,
     },
 };
 use crate::audio::windows::{ComGuard, MediaFoundationGuard};
@@ -94,12 +94,39 @@ pub fn trim_video_with_settings_and_progress(
     start_frame: u64,
     end_frame: u64,
     settings: &VideoEditSettings,
+    progress: impl FnMut(TrimProgress),
+) -> Result<VideoSummary> {
+    trim_video_with_curves_and_progress(
+        path,
+        summary,
+        start_frame,
+        end_frame,
+        settings,
+        &VideoEditCurves::default(),
+        progress,
+    )
+}
+
+/// Re-encodes one edited frame range with keyframed picture and audio levels.
+///
+/// The levels of `curves` multiply with the fades of `settings`.
+pub fn trim_video_with_curves_and_progress(
+    path: &Path,
+    summary: &VideoSummary,
+    start_frame: u64,
+    end_frame: u64,
+    settings: &VideoEditSettings,
+    curves: &VideoEditCurves,
     mut progress: impl FnMut(TrimProgress),
 ) -> Result<VideoSummary> {
     if start_frame >= end_frame || end_frame > summary.frames {
         bail!("the video selection is outside the recorded frame range");
     }
-    if start_frame == 0 && end_frame == summary.frames && settings.is_identity() {
+    if start_frame == 0
+        && end_frame == summary.frames
+        && settings.is_identity()
+        && curves.is_identity()
+    {
         return Ok(summary.clone());
     }
     let validated = settings.validate(summary.width, summary.height)?;
@@ -111,7 +138,7 @@ pub fn trim_video_with_settings_and_progress(
         path,
         summary,
         start_frame..end_frame,
-        settings,
+        (settings, curves),
         validated,
         &mut progress,
     );
@@ -134,7 +161,7 @@ fn trim_video_inner(
     source: &Path,
     summary: &VideoSummary,
     frame_range: Range<u64>,
-    settings: &VideoEditSettings,
+    (settings, curves): (&VideoEditSettings, &VideoEditCurves),
     validated: ValidatedVideoEditSettings,
     progress: &mut impl FnMut(TrimProgress),
 ) -> Result<VideoSummary> {
@@ -168,13 +195,15 @@ fn trim_video_inner(
         summary.fps,
         settings.video_fade_in,
         settings.video_fade_out,
-    );
+    )
+    .with_curve(&curves.video_gain, summary.fps);
     let audio_fade = FadeEnvelope::new(
         target_audio_frames,
         summary.sample_rate,
         settings.audio_fade_in,
         settings.audio_fade_out,
-    );
+    )
+    .with_curve(&curves.audio_gain, summary.sample_rate);
     let mut written_video = 0_u64;
     let mut written_audio = 0_u64;
     let mut video_ended = false;

@@ -15,12 +15,12 @@ use std::{
     thread,
 };
 
-use crossbeam_channel::{bounded, unbounded};
+use crossbeam_channel::{Receiver, unbounded};
 use record_core::{
-    audio::{self, AudioEvent, RecordConfig},
-    session::OutputTarget,
+    audio::{self, AudioCommand, AudioEvent, RecordConfig, SavedFile},
+    session::{DEFAULT_SEGMENT_DURATION, OutputTarget},
     spectrum::Spectrum,
-    video::{self, CropRect, FitMode, VideoConfig, VideoEvent, VideoSource},
+    video::{self, CropRect, FitMode, VideoConfig, VideoEvent, VideoSource, VideoSummary},
 };
 
 use crate::payload::{Mode, SoundUpdate, VideoUpdate, extent, file_name, spectrum_bands};
@@ -68,18 +68,31 @@ fn prepare(output: &Path) -> Result<(), String> {
     }
 }
 
-/// Splits an engine result into the file name and the failure text.
-fn outcome(result: Result<PathBuf, String>) -> (Option<String>, Option<String>) {
+/// Splits an engine result into the file name, the full path, and the
+/// failure text.
+fn outcome(result: Result<PathBuf, String>) -> (Option<String>, Option<String>, Option<String>) {
     match result {
-        Ok(path) => (Some(file_name(&path)), None),
-        Err(error) => (None, Some(error)),
+        Ok(path) => (
+            Some(file_name(&path)),
+            Some(path.display().to_string()),
+            None,
+        ),
+        Err(error) => (None, None, Some(error)),
     }
 }
 
 /// Starts an audio recording on a new thread.
 ///
-/// The last update is always `Stopped`.
-pub fn start_sound(output: PathBuf, control: &Control, report: Report<SoundUpdate>) {
+/// The recording writes numbered parts into `directory`. A clip request on
+/// `commands` closes the current part under a name, and `saved` receives
+/// each finished file. The last update is always `Stopped`.
+pub fn start_sound(
+    directory: PathBuf,
+    control: &Control,
+    commands: Receiver<AudioCommand>,
+    saved: Arc<dyn Fn(SavedFile) + Send + Sync>,
+    report: Report<SoundUpdate>,
+) {
     let control = control.clone();
     let worker = Arc::clone(&report);
     let started = thread::Builder::new()
@@ -87,9 +100,6 @@ pub fn start_sound(output: PathBuf, control: &Control, report: Report<SoundUpdat
         .spawn(move || {
             let report = worker;
             let (events, event_receiver) = unbounded::<AudioEvent>();
-            // The engine reads clip commands from this channel. This program
-            // sends none, and the sender must outlive the run.
-            let (_commands, command_receiver) = bounded(1);
             let translated = Arc::clone(&report);
             let translator = thread::spawn(move || {
                 let mut rate = 48_000_u32;
@@ -131,48 +141,60 @@ pub fn start_sound(output: PathBuf, control: &Control, report: Report<SoundUpdat
                         }
                         AudioEvent::Finalizing => SoundUpdate::Finalizing,
                         AudioEvent::Notice(text) => SoundUpdate::Notice { text },
-                        AudioEvent::Saved(_) => continue,
+                        AudioEvent::Saved(file) => {
+                            saved(file);
+                            continue;
+                        }
                     };
                     translated(update);
                 }
             });
-            let result = prepare(&output).and_then(|()| {
-                let config = RecordConfig {
-                    target: OutputTarget::SingleFile {
-                        path: output,
-                        replace: false,
-                    },
-                    bitrate: SOUND_BITRATE,
-                    duration: None,
-                    commands: command_receiver,
-                    stop: control.stop,
-                    paused: control.paused,
-                };
-                audio::record(config, &events)
-                    .map(|summary| summary.output)
-                    .map_err(|error| format!("{error:#}"))
-            });
+            let config = RecordConfig {
+                target: OutputTarget::Session {
+                    directory,
+                    segment_duration: DEFAULT_SEGMENT_DURATION,
+                },
+                bitrate: SOUND_BITRATE,
+                duration: None,
+                commands,
+                stop: control.stop,
+                paused: control.paused,
+            };
+            let result = audio::record(config, &events)
+                .map(|summary| summary.output)
+                .map_err(|error| format!("{error:#}"));
             drop(events);
             let _ = translator.join();
-            let (file, error) = outcome(result);
-            report(SoundUpdate::Stopped { file, error });
+            let (file, path, error) = outcome(result);
+            report(SoundUpdate::Stopped {
+                file,
+                path,
+                error,
+                discarded: false,
+            });
         });
     if let Err(error) = started {
         report(SoundUpdate::Stopped {
             file: None,
+            path: None,
             error: Some(format!("could not start the audio thread: {error}")),
+            discarded: false,
         });
     }
 }
 
 /// Starts a video recording of one monitor on a new thread.
 ///
-/// The last update is always `Stopped`.
+/// `crop` selects a part of the monitor in its own pixels. The default value
+/// records the whole monitor. `saved` receives the encoding of the finished
+/// file. The last update is always `Stopped`.
 pub fn start_video(
     output: PathBuf,
     monitor: u32,
+    crop: CropRect,
     fps: u32,
     control: &Control,
+    saved: Arc<dyn Fn(&VideoSummary) + Send + Sync>,
     report: Report<VideoUpdate>,
 ) {
     let control = control.clone();
@@ -199,7 +221,7 @@ pub fn start_video(
             let result = prepare(&output).and_then(|()| {
                 let config = VideoConfig {
                     source: VideoSource::Index(monitor),
-                    crop: CropRect::default(),
+                    crop,
                     fit: FitMode::default(),
                     canvas_width: 0,
                     canvas_height: 0,
@@ -215,18 +237,28 @@ pub fn start_video(
                 // The interface draws its own preview of the monitor, so the
                 // recorder sends none.
                 video::record_video(config, &events, None)
-                    .map(|summary| summary.output)
+                    .map(|summary| {
+                        saved(&summary);
+                        summary.output
+                    })
                     .map_err(|error| format!("{error:#}"))
             });
             drop(events);
             let _ = translator.join();
-            let (file, error) = outcome(result);
-            report(VideoUpdate::Stopped { file, error });
+            let (file, path, error) = outcome(result);
+            report(VideoUpdate::Stopped {
+                file,
+                path,
+                error,
+                discarded: false,
+            });
         });
     if let Err(error) = started {
         report(VideoUpdate::Stopped {
             file: None,
+            path: None,
             error: Some(format!("could not start the video thread: {error}")),
+            discarded: false,
         });
     }
 }

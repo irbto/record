@@ -179,22 +179,24 @@ function grid(
   g.globalAlpha = 1;
 }
 
-/** Home screen: a burst of sound on the dot grid. */
-export function audioArt(canvas: HTMLCanvasElement): void {
+/** Home screen: a burst of sound on the dot grid. With `time` the sound runs to the left. */
+export function audioArt(canvas: HTMLCanvasElement, time = 0): void {
+  const shift = Math.floor(time * 16);
   grid(canvas, token("--cyan"), (column, row, columns, rows) => {
     const middle = Math.floor(rows / 2);
-    const position = column / columns;
+    const position = (column + shift) / columns;
     const gate = Math.max(0, smooth(position * 5.2 + 3.1) * 1.9 - 0.5);
-    const reach = Math.round(Math.min(1, gate * (0.4 + 0.6 * noise(column * 1.7))) * (middle - 1));
+    const reach = Math.round(Math.min(1, gate * (0.4 + 0.6 * noise((column + shift) * 1.7))) * (middle - 1));
     const distance = Math.abs(row - middle);
     if (distance === 0) return 1;
     return distance <= reach ? 1 : 0;
   });
 }
 
-/** Home screen: a monitor with the recording dot. */
-export function videoArt(canvas: HTMLCanvasElement): void {
+/** Home screen: a monitor with the recording dot. With `time` the dot blinks and a pointer moves. */
+export function videoArt(canvas: HTMLCanvasElement, time = 0): void {
   const red = token("--red");
+  const lit = Math.floor(time * 2.5) % 2 === 0;
   grid(canvas, token("--green"), (column, row, columns, rows) => {
     const screenRows = Math.max(6, rows - 4);
     const screenColumns = Math.min(columns - 2, Math.round(screenRows * 1.9));
@@ -206,7 +208,13 @@ export function videoArt(canvas: HTMLCanvasElement): void {
       const edge = column === left || column === right || row === 0 || row === bottom;
       if (edge) return 1;
       const fromDot = Math.hypot(column - (right - 4), row - 3);
-      if (fromDot < 1.6) return red;
+      if (fromDot < 1.6) return lit ? red : 0.14;
+      if (time > 0) {
+        const pointerColumn = Math.round(left + screenColumns * (0.5 + 0.3 * Math.sin(time * 1.3)));
+        const pointerRow = Math.round(bottom * (0.5 + 0.25 * Math.cos(time * 1.7)));
+        if (column === pointerColumn && (row === pointerRow || row === pointerRow + 1)) return "#ffffff";
+        if (column === pointerColumn + 1 && row === pointerRow + 1) return "#ffffff";
+      }
       // Window shapes on the recorded desktop.
       const inWindow = column > left + 2 && column < left + screenColumns * 0.55 && row > 2 && row < bottom - 2;
       return inWindow && (row === 3 || column % 2 === 0) ? 0.45 : 0.14;
@@ -218,8 +226,9 @@ export function videoArt(canvas: HTMLCanvasElement): void {
   });
 }
 
-/** Home screen: a selected region on a dimmed screen. */
-export function shotArt(canvas: HTMLCanvasElement): void {
+/** Home screen: a selected region on a dimmed screen. With `time` its outline runs. */
+export function shotArt(canvas: HTMLCanvasElement, time = 0): void {
+  const run = Math.floor(time * 8);
   grid(canvas, token("--purple"), (column, row, columns, rows) => {
     const left = Math.floor(columns * 0.22);
     const right = Math.floor(columns * 0.74);
@@ -230,7 +239,7 @@ export function shotArt(canvas: HTMLCanvasElement): void {
     const onColumnEdge = column === left || column === right;
     const onRowEdge = row === top || row === bottom;
     if (onColumnEdge && onRowEdge) return "#ffffff";
-    if (onColumnEdge || onRowEdge) return 1;
+    if (onColumnEdge || onRowEdge) return time > 0 && (column + row + run) % 4 === 0 ? 0.3 : 1;
     return (column + row) % 2 === 0 ? 0.5 : 0.3;
   });
 }
@@ -299,4 +308,151 @@ export function standInSample(time: number, ear: number): number {
   const gate = Math.max(0, smooth(time * 0.6 + ear * 3.1) * 1.9 - 0.55);
   const syllable = 0.35 + 0.65 * smooth(time * 7.3 + ear * 11);
   return Math.min(1, gate * syllable * 1.25) * (noise(time * 913.7 + ear) * 2 - 1);
+}
+
+/**
+ * Draws one or more waveforms over the full width with a selected range.
+ * Everything outside the range is dimmed. `play` marks one position.
+ * All positions run from 0 to 1.
+ */
+export function lanes(
+  canvas: HTMLCanvasElement,
+  waves: { bins: readonly (readonly [number, number])[]; color: string }[],
+  start: number,
+  end: number,
+  play: number | null,
+  ramps: { from: number; to: number; color: string; top: boolean; held: boolean }[] = [],
+  curves: { points: [number, number][]; color: string; top: boolean }[] = [],
+): void {
+  const [g, width, height] = fit(canvas);
+  const band = height / Math.max(1, waves.length);
+  waves.forEach((wave, lane) => {
+    const middle = band * lane + band / 2;
+    const reach = band / 2 - 3;
+    g.fillStyle = wave.color;
+    g.globalAlpha = 0.35;
+    g.fillRect(0, Math.round(middle), width, 1);
+    g.globalAlpha = 1;
+    const count = wave.bins.length;
+    for (let x = 0; x < width && count; x += 2) {
+      const first = Math.floor((x / width) * count);
+      const last = Math.max(first + 1, Math.floor(((x + 2) / width) * count));
+      let low = 0;
+      let high = 0;
+      for (let index = first; index < last && index < count; index++) {
+        low = Math.min(low, wave.bins[index]![0]);
+        high = Math.max(high, wave.bins[index]![1]);
+      }
+      const top = middle - Math.min(1, high) * reach;
+      const bottom = middle - Math.max(-1, low) * reach;
+      g.fillRect(x, top, 1.5, Math.max(1, bottom - top));
+    }
+  });
+  const left = start * width;
+  const right = end * width;
+  g.fillStyle = "rgb(12 12 12 / 0.72)";
+  g.fillRect(0, 0, left, height);
+  g.fillRect(right, 0, width - right, height);
+  g.fillStyle = token("--text");
+  for (const [x, direction] of [[left, 1], [right, -1]] as const) {
+    g.fillRect(Math.round(x) - 1, 0, 2, height);
+    g.fillRect(direction === 1 ? Math.round(x) : Math.round(x) - 7, 0, 7, 12);
+  }
+  // A fade is a slope from one end of the range to its handle.
+  for (const ramp of ramps) {
+    const [low, high] = ramp.top ? [height / 2 - 2, 3] : [height / 2 + 2, height - 3];
+    g.strokeStyle = ramp.color;
+    g.fillStyle = ramp.color;
+    g.lineWidth = 1.5;
+    g.globalAlpha = ramp.held ? 1 : 0.55;
+    g.beginPath();
+    g.moveTo(ramp.from * width, low);
+    g.lineTo(ramp.to * width, high);
+    g.stroke();
+    if (ramp.held) g.fillRect(ramp.to * width - 4, high - (ramp.top ? 0 : 8), 8, 8);
+    g.globalAlpha = 1;
+  }
+  // A keyframed level is a line through its keyframes, drawn as diamonds.
+  for (const curve of curves) {
+    if (!curve.points.length) continue;
+    const [low, high] = curve.top ? [height / 2 - 4, 6] : [height / 2 + 4, height - 6];
+    const y = (level: number) => low + (high - low) * level;
+    const first = curve.points[0]!;
+    const last = curve.points[curve.points.length - 1]!;
+    g.strokeStyle = curve.color;
+    g.fillStyle = curve.color;
+    g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(0, y(first[1]));
+    for (const [x, level] of curve.points) g.lineTo(x * width, y(level));
+    g.lineTo(width, y(last[1]));
+    g.stroke();
+    for (const [x, level] of curve.points) {
+      g.beginPath();
+      g.moveTo(x * width, y(level) - 5);
+      g.lineTo(x * width + 5, y(level));
+      g.lineTo(x * width, y(level) + 5);
+      g.lineTo(x * width - 5, y(level));
+      g.fill();
+    }
+  }
+  if (play !== null) {
+    g.fillStyle = token("--red");
+    g.fillRect(Math.round(play * width), 0, 1, height);
+  }
+}
+
+/** Darkens the picture drawn by `contain`. A level of 1 changes nothing. */
+export function dim(canvas: HTMLCanvasElement, pictureWidth: number, pictureHeight: number, level: number): void {
+  if (!pictureWidth || !pictureHeight || level >= 1) return;
+  const { x, y, scale } = pictureBox(canvas, pictureWidth, pictureHeight);
+  const g = canvas.getContext("2d")!;
+  g.fillStyle = `rgb(0 0 0 / ${1 - Math.max(0, level)})`;
+  g.fillRect(x, y, pictureWidth * scale, pictureHeight * scale);
+}
+
+/** Returns where `contain` draws a picture of this size on a canvas. */
+export function pictureBox(canvas: HTMLCanvasElement, pictureWidth: number, pictureHeight: number): { x: number; y: number; scale: number } {
+  const box = canvas.getBoundingClientRect();
+  const scale = Math.min(box.width / Math.max(1, pictureWidth), box.height / Math.max(1, pictureHeight));
+  return { x: (box.width - pictureWidth * scale) / 2, y: (box.height - pictureHeight * scale) / 2, scale };
+}
+
+/** Dims the margins that a crop removes from the picture drawn by `contain`. */
+export function cropShade(
+  canvas: HTMLCanvasElement,
+  pictureWidth: number,
+  pictureHeight: number,
+  crop: { left: number; right: number; top: number; bottom: number },
+  handles = false,
+): void {
+  if (!pictureWidth || !pictureHeight) return;
+  const box = canvas.getBoundingClientRect();
+  const g = canvas.getContext("2d")!;
+  const scale = Math.min(box.width / pictureWidth, box.height / pictureHeight);
+  const width = pictureWidth * scale;
+  const height = pictureHeight * scale;
+  const x = (box.width - width) / 2;
+  const y = (box.height - height) / 2;
+  const [left, right, top, bottom] = [crop.left * scale, crop.right * scale, crop.top * scale, crop.bottom * scale];
+  g.fillStyle = "rgb(12 12 12 / 0.72)";
+  g.fillRect(x, y, left, height);
+  g.fillRect(x + width - right, y, right, height);
+  g.fillRect(x + left, y, Math.max(0, width - left - right), top);
+  g.fillRect(x + left, y + height - bottom, Math.max(0, width - left - right), bottom);
+  const [boxWidth, boxHeight] = [Math.max(0, width - left - right), Math.max(0, height - top - bottom)];
+  if (left + right + top + bottom > 0 || handles) {
+    g.strokeStyle = token("--text");
+    g.lineWidth = 1;
+    g.strokeRect(x + left + 0.5, y + top + 0.5, Math.max(0, boxWidth - 1), Math.max(0, boxHeight - 1));
+  }
+  if (!handles) return;
+  // Eight handles: the corners and the middle of each edge.
+  g.fillStyle = token("--text");
+  for (const column of [0, 0.5, 1]) {
+    for (const line of [0, 0.5, 1]) {
+      if (column === 0.5 && line === 0.5) continue;
+      g.fillRect(x + left + boxWidth * column - 4, y + top + boxHeight * line - 4, 8, 8);
+    }
+  }
 }

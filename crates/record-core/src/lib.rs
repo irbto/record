@@ -9,12 +9,18 @@
 pub mod audio;
 /// Saved clips and their conversions.
 pub mod clip;
+/// The countdown overlay with a glow along the screen edges.
+pub mod countdown;
 /// Small live pictures of the desktop for a preview.
 pub mod glance;
+/// Desktop rectangles and the monitors that hold them.
+pub mod region;
 /// HDR-aware screen capture with an on-screen annotation overlay.
 pub mod screenshot;
 /// Recording session folders and output file names.
 pub mod session;
+/// Opening, revealing, recycling, and thumbnails through the Windows shell.
+pub mod shell;
 /// Spectrum analysis for level displays.
 pub mod spectrum;
 /// Colors shared by every user interface.

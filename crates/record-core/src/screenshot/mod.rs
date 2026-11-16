@@ -26,6 +26,8 @@ pub mod events;
 pub mod format;
 /// Saved screenshot files for the hub.
 pub mod history;
+/// Global hotkeys as text and as Windows key codes.
+pub mod hotkeys;
 #[cfg(windows)]
 mod http;
 /// The capture thread with global hotkeys.
@@ -34,8 +36,11 @@ pub mod hub;
 mod icons;
 #[cfg(windows)]
 mod overlay;
+#[cfg(windows)]
+mod picker;
 /// Stored defaults of the hub.
 pub mod saved;
+mod select;
 /// Upload destinations in the ShareX custom uploader format.
 pub mod upload;
 
@@ -347,6 +352,127 @@ pub fn take_screenshot(config: &ScreenshotConfig) -> anyhow::Result<Option<Scree
     }))
 }
 
+/// Lets the user drag one rectangle on a frozen image of one monitor.
+///
+/// There is no toolbar. A mouse release or Enter confirms, and Esc cancels.
+/// Returns the rectangle in desktop pixels, or `None` after a cancel. The
+/// call blocks its thread until the user finishes.
+#[cfg(windows)]
+pub fn select_region(monitor: MonitorChoice) -> anyhow::Result<Option<DesktopRect>> {
+    picker::select_region(monitor)
+}
+
+/// Reports that the region selection is not available on this platform.
+#[cfg(not(windows))]
+pub fn select_region(_monitor: MonitorChoice) -> anyhow::Result<Option<DesktopRect>> {
+    anyhow::bail!("the region selection is available on Windows only")
+}
+
+/// Returns the largest size inside a box that keeps the shape of a picture.
+///
+/// A picture that fits keeps its size.
+#[must_use]
+pub fn size_inside(width: u32, height: u32, box_width: u32, box_height: u32) -> (u32, u32) {
+    if width <= box_width && height <= box_height {
+        return (width.max(1), height.max(1));
+    }
+    let scale = (f64::from(box_width) / f64::from(width.max(1)))
+        .min(f64::from(box_height) / f64::from(height.max(1)));
+    (
+        ((f64::from(width) * scale).floor() as u32).max(1),
+        ((f64::from(height) * scale).floor() as u32).max(1),
+    )
+}
+
+/// Opens a saved screenshot in the annotation overlay and saves the result
+/// over the file.
+///
+/// The image appears on the selected monitor with itself selected. An image
+/// larger than the monitor is shown smaller, and the saved result then has
+/// the smaller size. Returns `None` when the user closes the overlay without
+/// saving.
+#[cfg(windows)]
+pub fn edit_saved_image(
+    path: &Path,
+    monitor: MonitorChoice,
+    copy: bool,
+) -> anyhow::Result<Option<ScreenshotSummary>> {
+    use anyhow::Context;
+    use canvas::{Area, Canvas, Point, rgb};
+    use editor::Outcome;
+
+    overlay::enable_dpi_awareness();
+    let decoded = image::open(path)
+        .with_context(|| format!("could not read {}", path.display()))?
+        .into_rgb8();
+    // The capture gives the place and the size of the monitor.
+    let mut screen = capture::capture_monitor(monitor, None)?;
+    let (screen_width, screen_height) = (screen.image.width(), screen.image.height());
+    let (width, height) = size_inside(
+        decoded.width(),
+        decoded.height(),
+        screen_width,
+        screen_height,
+    );
+    let shown = if (width, height) == (decoded.width(), decoded.height()) {
+        decoded
+    } else {
+        image::imageops::resize(
+            &decoded,
+            width,
+            height,
+            image::imageops::FilterType::Triangle,
+        )
+    };
+    let pixels = shown
+        .pixels()
+        .map(|pixel| rgb(pixel[0], pixel[1], pixel[2]))
+        .collect();
+    let picture =
+        Canvas::from_pixels(width, height, pixels).context("the image has an unexpected size")?;
+    let left = ((screen_width - width) / 2) as i32;
+    let top = ((screen_height - height) / 2) as i32;
+    let mut frame = Canvas::new(screen_width, screen_height, rgb(0x0c, 0x0c, 0x0c));
+    frame.paste(&picture, Point::new(left, top));
+    screen.image = frame;
+    let selection = Area::new(left, top, left + width as i32, top + height as i32);
+    let (outcome, image, _) = overlay::edit_selected(screen, Some(selection))?;
+    let write_file = match outcome {
+        Outcome::Save => true,
+        Outcome::CopyOnly => false,
+        Outcome::Cancel | Outcome::Continue => return Ok(None),
+    };
+    if write_file {
+        let format = format::ImageFormat::from_path(path).unwrap_or_default();
+        let encoded = format.encode(image.to_rgb_bytes(), image.width(), image.height())?;
+        fs::write(path, encoded).with_context(|| format!("could not write {}", path.display()))?;
+    }
+    let clipboard = (copy || !write_file).then(|| overlay::copy_to_clipboard(&image));
+    Ok(Some(ScreenshotSummary {
+        output: write_file.then(|| path.to_path_buf()),
+        width: image.width(),
+        height: image.height(),
+        copied: matches!(clipboard, Some(Ok(()))),
+        clipboard_error: clipboard
+            .and_then(Result::err)
+            .map(|error| format!("{error:#}")),
+        uploaded: None,
+        upload_error: None,
+        hdr: false,
+        sdr_white_nits: 80.0,
+    }))
+}
+
+/// Reports that image editing is not available on this platform.
+#[cfg(not(windows))]
+pub fn edit_saved_image(
+    _path: &Path,
+    _monitor: MonitorChoice,
+    _copy: bool,
+) -> anyhow::Result<Option<ScreenshotSummary>> {
+    anyhow::bail!("screenshot editing is available on Windows only")
+}
+
 /// Places a saved PNG file on the clipboard.
 #[cfg(windows)]
 pub fn copy_file_to_clipboard(path: &Path) -> anyhow::Result<()> {
@@ -373,6 +499,15 @@ pub fn take_screenshot(_config: &ScreenshotConfig) -> anyhow::Result<Option<Scre
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picture_fits_a_box_and_keeps_its_shape() {
+        assert_eq!(size_inside(800, 600, 1_920, 1_080), (800, 600));
+        assert_eq!(size_inside(3_840, 2_160, 1_920, 1_080), (1_920, 1_080));
+        assert_eq!(size_inside(5_120, 1_440, 2_560, 1_440), (2_560, 720));
+        assert_eq!(size_inside(1_000, 4_000, 1_920, 1_080), (270, 1_080));
+        assert_eq!(size_inside(0, 0, 10, 10), (1, 1));
+    }
 
     #[test]
     fn desktop_rect_round_trips_and_accepts_negative_origins() {

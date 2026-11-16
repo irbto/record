@@ -40,9 +40,21 @@ export function desktopBridge(): Bridge | null {
     capture: (mode, delayed) => invoke("capture", { mode, delayed }),
     toggleAuto: () => invoke("toggle_auto"),
     monitors: () => invoke("monitors"),
-    startRecording: (mode, monitor, fps) => invoke("start_recording", { mode, monitor, fps }),
-    stopRecording: () => invoke("stop_recording"),
-    setPaused: (paused) => invoke("set_paused", { paused }),
+    startRecording: (mode, options = {}) => invoke("start_recording", { mode, ...options }),
+    stopRecording: (mode) => invoke("stop_recording", { mode }),
+    setPaused: (mode, paused) => invoke("set_paused", { mode, paused }),
+    discardRecording: (mode) => invoke("discard_recording", { mode }),
+    selectRegion: () => invoke("select_region"),
+    setHotkey: (id, keys) => invoke("set_hotkey", { id, keys }),
+    setHotkeyEnabled: (id, enabled) => invoke("set_hotkey_enabled", { id, enabled }),
+    uiSettings: () => invoke("ui_settings"),
+    setUiSettings: (json) => invoke("set_ui_settings", { json }),
+    async thumbnail(path, edge) {
+      const bytes = bytesOf(await invoke<unknown>("thumbnail", { path, edge }));
+      if (!bytes || !bytes.byteLength) throw "The thumbnail is empty";
+      return new Blob([bytes]);
+    },
+    deleteFile: (path) => invoke("delete_file", { path }),
     async monitorPreview({ left, top, width, height }) {
       const bytes = bytesOf(await invoke<unknown>("monitor_preview", { left, top, width, height }));
       if (!bytes || !bytes.byteLength) throw "The preview is empty";
@@ -58,6 +70,21 @@ export function desktopBridge(): Bridge | null {
     openFile: (path) => invoke("open_file", { path }),
     openFolder: (mode) => invoke("open_folder", { mode }),
     copyPicture: (path) => invoke("copy_picture", { path }),
+    editScreenshot: (path) => invoke("edit_screenshot", { path }),
+    saveClip: (name) => invoke("save_clip", { name }),
+    clipWaveform: (path) => invoke("clip_waveform", { path }),
+    playClip: (path, start, end) => invoke("play_clip", { path, start, end }),
+    stopClip: () => invoke("stop_clip"),
+    trimAudioClip: (path, start, end) => invoke("trim_audio_clip", { path, start, end }),
+    openVideoEditor: (path) => invoke("open_video_editor", { path }),
+    closeVideoEditor: () => invoke("close_video_editor"),
+    async editorFrame(seconds) {
+      const bytes = bytesOf(await invoke<unknown>("editor_frame", { seconds }));
+      if (!bytes || !bytes.byteLength) throw "The picture is empty";
+      return new Blob([bytes], { type: "image/jpeg" });
+    },
+    editorWaveform: () => invoke("editor_waveform"),
+    exportVideo: (edit) => invoke("export_video", { edit }),
     quit: () => invoke("quit"),
     closeWindow: () => invoke("close_window"),
     minimize: () => invoke("minimize"),

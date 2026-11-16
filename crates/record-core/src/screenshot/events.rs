@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
     sync::{
         Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::Duration,
 };
@@ -17,6 +17,7 @@ use crossbeam_channel::Receiver;
 use super::{
     CaptureMode, MonitorChoice, ScreenshotSummary, default_directory,
     format::ImageFormat,
+    hotkeys::{Bindings, HotkeyId, HotkeyState},
     saved::SavedSettings,
     upload::{Uploader, default_destination, resolve_destination},
 };
@@ -51,6 +52,11 @@ pub struct HubSettings {
     pub uploader: Mutex<Option<Uploader>>,
     /// Uploads each image to the destination and copies the link.
     pub upload: AtomicBool,
+    /// The global hotkeys. The capture thread reads them again after
+    /// [`HubRequest::ReloadHotkeys`].
+    pub hotkeys: Mutex<Bindings>,
+    /// Seconds that the desktop program waits before a recording starts.
+    pub countdown_seconds: AtomicU32,
 }
 
 /// One request from the terminal hub to the capture thread.
@@ -62,6 +68,8 @@ pub enum HubRequest {
     Delayed(CaptureMode),
     /// Start or stop auto capture.
     ToggleAuto,
+    /// Register the global hotkeys again from the settings.
+    ReloadHotkeys,
 }
 
 /// One report from the capture thread.
@@ -82,6 +90,11 @@ pub enum HubEvent {
     Auto(bool),
     /// The tray menu asked the hub to stop.
     QuitRequested,
+    /// The state of every global hotkey, after each registration.
+    Hotkeys(Vec<HotkeyState>),
+    /// The user pressed the hotkey of a video recording. The capture thread
+    /// records no video, so the program that owns the hub acts on it.
+    VideoHotkey(HotkeyId),
 }
 
 impl HubSettings {
@@ -109,6 +122,8 @@ impl HubSettings {
             save: AtomicBool::new(saved.save),
             upload: AtomicBool::new(uploader.is_some() && saved.upload),
             uploader: Mutex::new(uploader),
+            hotkeys: Mutex::new(saved.hotkeys),
+            countdown_seconds: AtomicU32::new(saved.countdown_seconds),
         }
     }
 
@@ -125,6 +140,8 @@ impl HubSettings {
             interval_seconds: options.auto_interval.as_secs_f32(),
             primary_monitor: options.monitor == MonitorChoice::Primary,
             sdr_white_nits: options.sdr_white_nits,
+            hotkeys: self.hotkeys(),
+            countdown_seconds: self.countdown_seconds.load(Ordering::Relaxed),
         }
         .store()
     }
@@ -148,6 +165,15 @@ impl HubSettings {
         match self.options.lock() {
             Ok(options) => options.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Returns a copy of the global hotkeys.
+    #[must_use]
+    pub fn hotkeys(&self) -> Bindings {
+        match self.hotkeys.lock() {
+            Ok(hotkeys) => *hotkeys,
+            Err(poisoned) => *poisoned.into_inner(),
         }
     }
 

@@ -357,7 +357,7 @@ unsafe fn read_frame(
                 let texels = unsafe {
                     slice::from_raw_parts(mapped.pData.cast::<u8>().add(row * stride), width * 8)
                 };
-                pixels.extend(texels.chunks_exact(8).map(|texel| {
+                pixels.extend(texels.as_chunks::<8>().0.iter().map(|texel| {
                     let channel = |index: usize| {
                         half_to_f32(u16::from_le_bytes([texel[index], texel[index + 1]]))
                     };
@@ -374,7 +374,9 @@ unsafe fn read_frame(
                 };
                 pixels.extend(
                     texels
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|texel| u32::from_le_bytes([texel[0], texel[1], texel[2], 0])),
                 );
             }

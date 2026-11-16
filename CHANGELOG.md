@@ -14,6 +14,16 @@ This file gives the important project changes. The project uses [Semantic Versio
   the window, the tray menu captures and quits, and only one copy runs.
   `--hidden` starts it in the tray, and `--quit` asks the running copy to
   exit.
+- `record-desktop` cuts named clips in an audio recording and trims them,
+  opens a finished video in an editor for range, fades, and crop, and opens
+  a saved screenshot in the annotation overlay again.
+- The video editor of `record-desktop` has mouse tools for range, fades,
+  and crop, and keyframes for opacity and volume. The trim engine takes
+  keyframed picture and audio levels.
+- `record-desktop` records audio and video at the same time, discards a
+  recording, records a selected region, counts down before a start, and has
+  global hotkeys for video. Every hotkey and key can be changed. The file
+  lists show dates, sizes, and optional thumbnails.
 - `scripts/build-install.ps1` builds and installs both programs. It closes
   the running copies first and starts them again.
 - Screenshots save as PNG, JPEG, WebP, BMP, GIF, or TIFF. The settings and
