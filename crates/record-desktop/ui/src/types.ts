@@ -9,8 +9,54 @@ export type SoundUpdate =
   | { kind: "started"; sampleRate: number; bitrate: number }
   | { kind: "block"; left: [number, number]; right: [number, number]; seconds: number; bands: number[] }
   | { kind: "finalizing" }
+  | ({ kind: "saved" } & Save)
   | { kind: "notice"; text: string }
   | { kind: "stopped"; file: string | null; error: string | null };
+
+/** One finished file of an audio session: a part or a named clip. */
+export interface Save {
+  name: string;
+  path: string;
+  clip: boolean;
+  seconds: number;
+  editable: boolean;
+}
+
+/** The shape of one audio clip: the extent of each column. */
+export interface ClipShape {
+  left: [number, number][];
+  right: [number, number][];
+  seconds: number;
+}
+
+/** One video that is open in the editor. */
+export interface VideoInfo {
+  name: string;
+  path: string;
+  width: number;
+  height: number;
+  fps: number;
+  frames: number;
+}
+
+/** The edit of a video. Times are in seconds, crops in pixels. */
+export interface VideoEdit {
+  startFrame: number;
+  endFrame: number;
+  audioFadeIn: number;
+  audioFadeOut: number;
+  videoFadeIn: number;
+  videoFadeOut: number;
+  cropLeft: number;
+  cropRight: number;
+  cropTop: number;
+  cropBottom: number;
+}
+
+export type EditUpdate =
+  | { kind: "stage"; name: string }
+  | { kind: "progress"; done: number; total: number }
+  | { kind: "done"; info: VideoInfo | null; error: string | null };
 
 export type VideoUpdate =
   | { kind: "started"; width: number; height: number; fps: number }
@@ -88,6 +134,8 @@ export interface Events {
   sound: SoundUpdate;
   video: VideoUpdate;
   shots: ShotUpdate;
+  edit: EditUpdate;
+  played: null;
   closing: null;
   drop: string[];
 }
@@ -117,6 +165,22 @@ export interface Bridge {
   openFile(path: string): Promise<void>;
   openFolder(mode: Mode): Promise<void>;
   copyPicture(path: string): Promise<void>;
+  /** Opens one saved screenshot in the annotation overlay. */
+  editScreenshot(path: string): Promise<void>;
+  /** Cuts the audio since the last file into a named clip. */
+  saveClip(name: string): Promise<void>;
+  clipWaveform(path: string): Promise<ClipShape>;
+  playClip(path: string, start: number, end: number): Promise<void>;
+  stopClip(): Promise<void>;
+  /** Keeps one part of a clip and returns the new length in seconds. */
+  trimAudioClip(path: string, start: number, end: number): Promise<number>;
+  openVideoEditor(path: string): Promise<VideoInfo>;
+  closeVideoEditor(): Promise<void>;
+  /** The picture of the open video at one time. */
+  editorFrame(seconds: number): Promise<Blob>;
+  editorWaveform(): Promise<[number, number][]>;
+  /** Writes the edit over the file. The `edit` event reports the progress. */
+  exportVideo(edit: VideoEdit): Promise<void>;
   /** Ends the program. */
   quit(): Promise<void>;
   /** Closes the window as the close button does: to the tray, or for good. */

@@ -170,6 +170,8 @@ The screenshot screen uses the same hub thread as the terminal hub. The window m
 
 The window has no system frame. The interface draws the title bar, Tauri moves the window when the pointer drags the empty part of it, and the three window buttons call commands.
 
+The `editing` module holds what clips and edits need between two calls. An audio recording is a session, so a clip request closes the current part under a name, and the temporary PCM source of that clip stays available for a trim. The video editor keeps one decoder thread for the open file. The interface asks it for single pictures as JPEG and reads the audio envelope once. An export closes the decoder, runs the trim of `record-core` on its own thread with progress events, and opens the new file again. An index in the settings folder remembers the encoding of each recorded video, because the trim needs it.
+
 The program keeps a tray icon and runs as one copy. The close button hides the window unless the user turned that off. A second start reaches the first copy through the single-instance plugin: it shows the window, or with `--quit` it ends the program. A recording that runs when the program quits saves its file first. The program exits when the engine reports the end of the recording.
 
 The interface is TypeScript without a framework. `main.ts` holds the state and the screens, `menu.ts` the menu bar, `draw.ts` the canvas drawing, and `bridge.ts` the calls into Rust. The address of a screen is a hash route such as `#/audio`. `demo.ts` is a simulation of the engines for a plain browser, so the interface can be seen and tested without Windows. The colors are the palette of `record-core`, which the terminal interface also uses.

@@ -755,7 +755,7 @@ impl Editor {
     }
 
     /// Stores the selection and refreshes its size label when the size changes.
-    fn set_selection(&mut self, selection: Option<Area>) {
+    pub(crate) fn set_selection(&mut self, selection: Option<Area>) {
         self.selection = selection;
         self.refresh_selection_label(selection);
     }

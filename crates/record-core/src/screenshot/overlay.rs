@@ -75,10 +75,24 @@ struct OverlayState {
 /// Returns how the session ended, the final cropped image, and the selection
 /// in monitor pixels.
 pub(crate) fn edit(captured: CapturedMonitor) -> Result<(Outcome, Canvas, Option<Area>)> {
+    edit_selected(captured, None)
+}
+
+/// Opens the overlay with a selection already in place.
+///
+/// A saved image that is opened again starts with itself selected.
+pub(crate) fn edit_selected(
+    captured: CapturedMonitor,
+    selection: Option<Area>,
+) -> Result<(Outcome, Canvas, Option<Area>)> {
     let (width, height) = (captured.image.width(), captured.image.height());
+    let mut editor = Editor::new(captured.image.clone(), captured.scale, Box::new(GdiText));
+    if selection.is_some() {
+        editor.set_selection(selection);
+    }
     let state = Box::new(OverlayState {
-        frame: captured.image.clone(),
-        editor: Editor::new(captured.image, captured.scale, Box::new(GdiText)),
+        frame: captured.image,
+        editor,
         outcome: Outcome::Cancel,
     });
     let state = Box::into_raw(state);

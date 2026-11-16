@@ -57,6 +57,19 @@ pub enum SoundUpdate {
     },
     /// Capture stopped and the file is being closed.
     Finalizing,
+    /// One file of the session is complete: a part or a named clip.
+    Saved {
+        /// File name without its folder.
+        name: String,
+        /// Full path, for the commands that open or edit the file.
+        path: String,
+        /// Reports whether the user named this file as a clip.
+        clip: bool,
+        /// Length in seconds.
+        seconds: f64,
+        /// Reports whether the clip can still be trimmed.
+        editable: bool,
+    },
     /// A short message from the engine.
     Notice {
         /// The message text.
@@ -66,6 +79,85 @@ pub enum SoundUpdate {
     Stopped {
         /// Name of the saved file, when the recording succeeded.
         file: Option<String>,
+        /// The reason for a failure.
+        error: Option<String>,
+    },
+}
+
+/// The shape of one audio clip for the trim view.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ClipShape {
+    /// Lowest and highest left sample of each column.
+    pub left: Vec<[f32; 2]>,
+    /// Lowest and highest right sample of each column.
+    pub right: Vec<[f32; 2]>,
+    /// Length of the clip in seconds.
+    pub seconds: f64,
+}
+
+/// One video that is open in the editor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct VideoInfo {
+    /// File name without its folder.
+    pub name: String,
+    /// Full path of the file.
+    pub path: String,
+    /// Picture width in pixels.
+    pub width: u32,
+    /// Picture height in pixels.
+    pub height: u32,
+    /// Frames per second.
+    pub fps: u32,
+    /// Number of frames.
+    pub frames: u64,
+}
+
+/// The edit that the interface asks for. Times are in seconds.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoEdit {
+    /// First frame to keep.
+    pub start_frame: u64,
+    /// Frame after the last frame to keep.
+    pub end_frame: u64,
+    /// Length of the audio fade at the start.
+    pub audio_fade_in: f64,
+    /// Length of the audio fade at the end.
+    pub audio_fade_out: f64,
+    /// Length of the picture fade at the start.
+    pub video_fade_in: f64,
+    /// Length of the picture fade at the end.
+    pub video_fade_out: f64,
+    /// Pixels to remove at the left edge.
+    pub crop_left: u32,
+    /// Pixels to remove at the right edge.
+    pub crop_right: u32,
+    /// Pixels to remove at the top edge.
+    pub crop_top: u32,
+    /// Pixels to remove at the bottom edge.
+    pub crop_bottom: u32,
+}
+
+/// One report from a running video export.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum EditUpdate {
+    /// The export entered a stage without a count.
+    Stage {
+        /// Name of the stage.
+        name: &'static str,
+    },
+    /// Frames written so far.
+    Progress {
+        /// Number of frames written.
+        done: u64,
+        /// Number of frames to write.
+        total: u64,
+    },
+    /// The export ended. The editor shows the file as it is now.
+    Done {
+        /// The file after the export, when it opens.
+        info: Option<VideoInfo>,
         /// The reason for a failure.
         error: Option<String>,
     },

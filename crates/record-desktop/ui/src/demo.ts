@@ -2,7 +2,7 @@
 // viewed and tested without Windows. Nothing is recorded.
 
 import { standInDesktop, standInSample } from "./draw";
-import type { Bridge, CaptureKind, Events, FileEntry, Mode, Snapshot } from "./types";
+import type { Bridge, CaptureKind, Events, FileEntry, Mode, Snapshot, VideoInfo } from "./types";
 
 const two = (value: number) => String(value).padStart(2, "0");
 
@@ -81,6 +81,22 @@ export function demoBridge(): Bridge {
   let signal = 21.4;
   let autoTimer = 0;
   let maximized = false;
+  let playTimer = 0;
+  let clipCount = 0;
+  let partCount = 0;
+  let editing: VideoInfo | null = null;
+  const wave = (bins: number, seed: number): [number, number][] =>
+    Array.from({ length: bins }, (_, index) => {
+      const level = Math.abs(standInSample(index / 14 + seed, seed)) * 0.8;
+      return [-level, level];
+    });
+  const picture = (shape: number, time: number) => {
+    desktop.height = Math.round(desktop.width / shape);
+    standInDesktop(desktop.getContext("2d")!, desktop.width, desktop.height, time);
+    return new Promise<Blob>((resolve, reject) => {
+      desktop.toBlob((blob) => (blob ? resolve(blob) : reject("The preview is empty")), "image/jpeg", 0.8);
+    });
+  };
   const desktop = document.createElement("canvas");
   desktop.width = 640;
   desktop.height = 360;
@@ -180,7 +196,8 @@ export function demoBridge(): Bridge {
     },
     async startRecording(mode, _monitor, fps) {
       if (running) throw "A recording runs already. Save it first.";
-      const name = `recording-${stamp()}.${mode === "audio" ? "mp3" : "mp4"}`;
+      const name = mode === "audio" ? `recording-${stamp()}` : `recording-${stamp()}.mp4`;
+      partCount = 0;
       const session = { mode, name, timer: 0, frames: 0, paused: false };
       running = session;
       window.setTimeout(() => {
@@ -222,7 +239,12 @@ export function demoBridge(): Bridge {
       emit(event, { kind: "finalizing" });
       window.setTimeout(() => {
         running = null;
-        files[session.mode].unshift(entry(session.mode, session.name, 0));
+        if (session.mode === "audio") {
+          partCount += 1;
+          const part = `part-${String(partCount).padStart(3, "0")}.mp3`;
+          files.audio.unshift(entry("audio", `${session.name}\\${part}`, 0));
+          emit("sound", { kind: "saved", name: part, path: `${folders.audio}\\${session.name}\\${part}`, clip: false, seconds: session.frames / 48000, editable: false });
+        } else files.video.unshift(entry("video", session.name, 0));
         emit(event, { kind: "stopped", file: session.name, error: null });
       }, 300);
     },
@@ -233,12 +255,7 @@ export function demoBridge(): Bridge {
     },
     async monitorPreview(monitor) {
       // The stand-in desktop moves on its own clock, as a real one does.
-      const shape = monitor.width / monitor.height;
-      desktop.height = Math.round(desktop.width / shape);
-      standInDesktop(desktop.getContext("2d")!, desktop.width, desktop.height, performance.now() / 1000 + monitor.index * 40);
-      return new Promise<Blob>((resolve, reject) => {
-        desktop.toBlob((blob) => (blob ? resolve(blob) : reject("The preview is empty")), "image/jpeg", 0.8);
-      });
+      return picture(monitor.width / monitor.height, performance.now() / 1000 + monitor.index * 40);
     },
     async files(mode) {
       return files[mode].map((file) => ({ ...file }));
@@ -250,6 +267,63 @@ export function demoBridge(): Bridge {
     async openFile() {},
     async openFolder() {},
     async copyPicture() {},
+    async editScreenshot(path) {
+      emit("shots", { kind: "capturing" });
+      window.setTimeout(() => emit("shots", { kind: "finished", file: path.split("\\").pop() ?? path, width: 2560, height: 1440, url: null, copied: state.copy, hdrNits: null, error: null }), 400);
+    },
+    async saveClip(name) {
+      const session = running;
+      if (!session || session.mode !== "audio") throw "No audio recording runs";
+      const stem = name.trim().replace(/\.mp3$/i, "");
+      if (!stem || /[\\/:*?"<>|]/.test(stem)) throw "the clip name is not a file name";
+      clipCount += 1;
+      partCount += 1;
+      const seconds = Math.max(1, session.frames / 48000);
+      session.frames = 0;
+      emit("sound", { kind: "saved", name: `${stem}.mp3`, path: `${folders.audio}\\${session.name}\\${stem}.mp3`, clip: true, seconds, editable: true });
+    },
+    async clipWaveform() {
+      return { left: wave(600, 1 + clipCount), right: wave(600, 7 + clipCount), seconds: 12 };
+    },
+    async playClip(_path, start, end) {
+      window.clearTimeout(playTimer);
+      playTimer = window.setTimeout(() => emit("played", null), (end - start) * 1000);
+    },
+    async stopClip() {
+      window.clearTimeout(playTimer);
+      emit("played", null);
+    },
+    async trimAudioClip(_path, start, end) {
+      return end - start;
+    },
+    async openVideoEditor(path) {
+      editing = { name: path.split("\\").pop() ?? path, path, width: 1920, height: 1080, fps: 60, frames: 1500 };
+      return { ...editing };
+    },
+    async closeVideoEditor() {
+      editing = null;
+    },
+    async editorFrame(seconds) {
+      return picture(16 / 9, seconds);
+    },
+    async editorWaveform() {
+      return wave(900, 3);
+    },
+    async exportVideo(edit) {
+      const video = editing;
+      if (!video) throw "No video is open";
+      const total = edit.endFrame - edit.startFrame;
+      emit("edit", { kind: "stage", name: "Preparing" });
+      let done = 0;
+      const timer = window.setInterval(() => {
+        done = Math.min(total, done + Math.ceil(total / 12));
+        emit("edit", { kind: "progress", done, total });
+        if (done < total) return;
+        window.clearInterval(timer);
+        editing = { ...video, frames: total };
+        emit("edit", { kind: "done", info: { ...editing }, error: null });
+      }, 60);
+    },
     async quit() {},
     async closeWindow() {},
     async minimize() {},

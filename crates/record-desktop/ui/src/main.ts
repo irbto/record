@@ -4,8 +4,9 @@
 import { desktopBridge } from "./bridge";
 import { demoBridge } from "./demo";
 import * as draw from "./draw";
+import { openClipEditor, openVideoEditor, setupEditors, showVideoEditor, videoEditorOpen } from "./edit";
 import { closeMenus, setupMenus, type MenuEntry } from "./menu";
-import type { CaptureKind, FileEntry, Flag, Mode, Monitor, Route, Setting, ShotUpdate, Snapshot, SoundUpdate, VideoUpdate } from "./types";
+import type { CaptureKind, FileEntry, Flag, Mode, Monitor, Route, Save, Setting, ShotUpdate, Snapshot, SoundUpdate, VideoUpdate } from "./types";
 
 const bridge = desktopBridge() ?? demoBridge();
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -22,6 +23,8 @@ const app = {
   video: { monitor: 0, fps: 60, picture: null as ImageBitmap | null, polling: false, problem: "" },
   shots: { busy: false, picked: 0, bitmap: null as ImageBitmap | null, shown: "" },
   bands: [] as number[],
+  /** The parts and clips of the newest audio session. */
+  saves: [] as Save[],
 };
 const traces = { left: new draw.Trace(), right: new draw.Trace() };
 
@@ -167,6 +170,7 @@ async function startRecording(): Promise<void> {
   resetRecording();
   app.rec.mode = mode;
   app.rec.phase = "starting";
+  if (mode === "audio") app.saves = [];
   traces.left.clear();
   traces.right.clear();
   say("");
@@ -217,10 +221,13 @@ function recordOrPause(): void {
 
 function onStopped(file: string | null, error: string | null): void {
   const mode = app.rec.mode;
+  const path = app.rec.file;
   resetRecording();
   if (error) say(`Recording failed: ${error}`, "bad");
   else if (file) say(`Saved ${file}`, "good");
   render();
+  // A finished video opens in the editor, as in the terminal program.
+  if (mode === "video" && !error && path && app.route === "video") void openVideoEditor(path);
   if (mode) void refreshFiles(mode);
   if (app.route === "home") void enter("home");
 }
@@ -245,6 +252,11 @@ function onSound(update: SoundUpdate): void {
       rec.phase = "saving";
       render();
       break;
+    case "saved":
+      app.saves.push({ name: update.name, path: update.path, clip: update.clip, seconds: update.seconds, editable: update.editable });
+      if (update.clip) say(`Clip ${update.name}`, "good");
+      render();
+      break;
     case "notice":
       say(update.text);
       break;
@@ -252,6 +264,34 @@ function onSound(update: SoundUpdate): void {
       onStopped(update.file, update.error);
       break;
   }
+}
+
+/** Asks for a name and cuts the audio since the last file into a clip. */
+function openClipName(): void {
+  if (app.rec.mode !== "audio" || (app.rec.phase !== "rec" && app.rec.phase !== "paused")) return;
+  const count = app.saves.filter((save) => save.clip).length + 1;
+  const input = h("input", { type: "text", id: "clip-name", value: `clip-${count}`, spellcheck: false });
+  const problem = h("p", { className: "problem" });
+  const send = async () => {
+    try {
+      await bridge.saveClip(input.value);
+      dialog.close();
+    } catch (error) {
+      problem.textContent = String(error);
+    }
+  };
+  openDialog(
+    "Clip",
+    (body) => {
+      body.append(
+        h("div", { className: "field" }, h("label", { htmlFor: input.id, textContent: "Name" }), input),
+        problem,
+        h("div", { className: "buttons" }, closeButton("Cancel"), h("button", { className: "button save", type: "submit", textContent: "Create clip" })),
+      );
+    },
+    () => void send(),
+  );
+  input.select();
 }
 
 function onVideo(update: VideoUpdate): void {
@@ -285,7 +325,7 @@ function onVideo(update: VideoUpdate): void {
 async function pollPicture(): Promise<void> {
   const video = app.video;
   const monitor = app.monitors.find((one) => one.index === video.monitor);
-  if (video.polling || !monitor || app.route !== "video" || document.hidden) return;
+  if (video.polling || !monitor || app.route !== "video" || videoEditorOpen() || document.hidden) return;
   video.polling = true;
   let problem = "";
   try {
@@ -352,6 +392,8 @@ function onShot(update: ShotUpdate): void {
       if (update.error) parts.unshift(update.error);
       say(parts.filter(Boolean).join(" · "), update.error ? "bad" : "good");
       shots.picked = 0;
+      // An edited file keeps its name, so the picture must load again.
+      shots.shown = "";
       void refreshFiles("screenshot");
       break;
     }
@@ -467,7 +509,8 @@ function renderTabs(): void {
     const busy = target === "screenshot" ? shots.busy || Boolean(snapshot?.autoActive) : target === rec.mode;
     tab.classList.toggle("busy", busy);
   }
-  for (const view of document.querySelectorAll<HTMLElement>(".view")) view.classList.toggle("on", view.id === route);
+  const shown = route === "video" && videoEditorOpen() ? "editor" : route;
+  for (const view of document.querySelectorAll<HTMLElement>(".view")) view.classList.toggle("on", view.id === shown);
   for (const choice of document.querySelectorAll<HTMLAnchorElement>(".choice")) {
     choice.classList.toggle("busy", rec.mode !== null && choice.hash === `#/${rec.mode}`);
   }
@@ -499,15 +542,17 @@ function renderTransport(mode: Recorder): void {
     element.addEventListener("click", action);
     return element;
   };
-  $(`transport-${mode}`).replaceChildren(
+  const parts: (Node | false)[] = [
     h("span", { className: `state ${phase}`, textContent: stateLabels[phase].toUpperCase() }),
     h("span", { className: "clock", id: `clock-${mode}`, textContent: clock(mine ? elapsed() : 0) }),
     h("span", { className: "facts", textContent: facts }),
     h("span", { className: "spacer" }),
     button(`record-${mode}`, "go", "● Record", "Ctrl+R", phase === "idle" && !other, () => void startRecording()),
     button(`pause-${mode}`, "", phase === "paused" ? "Resume" : "Pause", "Ctrl+P", live, () => void togglePause()),
+    mode === "audio" && button("clip-audio", "", "Clip", "Ctrl+K", live, openClipName),
     button(`stop-${mode}`, "save", "■ Save and stop", "Ctrl+S", live || phase === "starting", () => void stopRecording()),
-  );
+  ];
+  $(`transport-${mode}`).replaceChildren(...parts.filter((part): part is Node => part !== false)  );
 }
 
 function fileRows(parent: HTMLElement, mode: Mode, empty: string): void {
@@ -518,8 +563,8 @@ function fileRows(parent: HTMLElement, mode: Mode, empty: string): void {
       id: `file-${file.path}`,
       name: file.name,
       key: age(file.ageSeconds),
-      title: "Show in folder",
-      action: () => void bridge.reveal(file.path).catch(fail),
+      title: mode === "video" ? "Edit" : "Show in folder",
+      action: () => void (mode === "video" ? openVideoEditor(file.path) : bridge.reveal(file.path).catch(fail)),
     });
   }
   if (!files.length) note(parent, empty);
@@ -558,8 +603,25 @@ function renderHome(): void {
 
 function renderAudio(): void {
   renderTransport("audio");
-  $("audio-files-title").textContent = `Recordings · ${app.files.audio.length}`;
-  fileRows($("audio-files"), "audio", "No recordings");
+  const list = $("audio-files");
+  if (app.rec.mode !== "audio" && !app.saves.length) {
+    $("audio-files-title").textContent = `Recordings · ${app.files.audio.length}`;
+    fileRows(list, "audio", "No recordings");
+    return;
+  }
+  // The session: every finished part and every named clip.
+  $("audio-files-title").textContent = `Saves · ${app.saves.length}`;
+  list.replaceChildren();
+  for (const save of app.saves) {
+    row(list, {
+      id: `save-${save.path}`,
+      name: save.name,
+      key: save.editable ? `${clock(save.seconds)} · edit` : clock(save.seconds),
+      title: save.editable ? "Edit" : "Show in folder",
+      action: () => void (save.editable ? openClipEditor(save) : bridge.reveal(save.path).catch(fail)),
+    });
+  }
+  if (!app.saves.length) note(list, "No saves");
 }
 
 function renderVideo(): void {
@@ -659,6 +721,7 @@ function renderScreenshot(): void {
     return element;
   };
   $("shot-actions").replaceChildren(
+    action("shot-edit", "Edit", () => void withShot(bridge.editScreenshot, "")),
     action("shot-copy", "Copy image", () => void withShot(bridge.copyPicture, "Copied {}")),
     action("shot-reveal", "Show in folder", () => void withShot(bridge.reveal, "")),
     action("shot-open", "Open", () => void withShot(bridge.openFile, "")),
@@ -682,6 +745,7 @@ function render(): void {
   renderTabs();
   if (app.route === "home") renderHome();
   else if (app.route === "audio") renderAudio();
+  else if (app.route === "video" && videoEditorOpen()) showVideoEditor();
   else if (app.route === "video") renderVideo();
   else renderScreenshot();
   renderStatus();
@@ -711,7 +775,7 @@ function paint(): void {
     draw.spectrum($<HTMLCanvasElement>("spectrum"), app.bands.length ? app.bands : new Array<number>(24).fill(0), draw.token("--purple"));
     draw.meter($("bar-left"), $("db-left"), live ? traces.left.peak(10) : 0);
     draw.meter($("bar-right"), $("db-right"), live ? traces.right.peak(10) : 0);
-  } else if (route === "video") {
+  } else if (route === "video" && !videoEditorOpen()) {
     const picture = app.video.picture;
     draw.contain($<HTMLCanvasElement>("desktop"), picture, picture?.width ?? 0, picture?.height ?? 0);
   }
@@ -883,6 +947,7 @@ function openShortcuts(): void {
       ["Ctrl+R", "Record"],
       ["Space", "Record, pause, resume"],
       ["Ctrl+P", "Pause, resume"],
+      ["Ctrl+K", "Clip"],
       ["Ctrl+S", "Save and stop"],
       ["Ctrl+O", "Open folder"],
       ["Ctrl+D", "Destination"],
@@ -933,6 +998,7 @@ function menuEntries(menu: string): MenuEntry[] {
       return [
         { label: "Record", key: "Ctrl+R", enabled: rec.phase === "idle" && onRecorder, run: () => void startRecording() },
         { label: rec.phase === "paused" ? "Resume" : "Pause", key: "Ctrl+P", enabled: live, run: () => void togglePause() },
+        { label: "Clip", key: "Ctrl+K", enabled: live && rec.mode === "audio", run: openClipName },
         { label: "Save and stop", key: "Ctrl+S", enabled: live || rec.phase === "starting", run: () => void stopRecording() },
         "separator",
         { label: "Open folder", key: "Ctrl+O", enabled: app.route !== "home", run: () => void openFolder() },
@@ -981,6 +1047,7 @@ const shortcuts: Record<string, () => void> = {
   r: () => void startRecording(),
   p: () => void togglePause(),
   s: () => void stopRecording(),
+  k: openClipName,
   o: () => void openFolder(),
   d: openDestinations,
   ",": openSettings,
@@ -1018,6 +1085,21 @@ function onKey(event: KeyboardEvent): void {
 
 async function start(): Promise<void> {
   setupMenus($("menubar"), ["File", "View", "Capture", "Help"], menuEntries);
+  setupEditors({
+    bridge,
+    h,
+    say,
+    fail,
+    openDialog,
+    closeDialog: () => dialog.close(),
+    render,
+    clipTrimmed: (path, seconds) => {
+      const save = app.saves.find((one) => one.path === path);
+      if (save) save.seconds = seconds;
+      render();
+    },
+    videoSaved: () => void refreshFiles("video"),
+  });
   document.addEventListener("keydown", onKey);
   document.addEventListener("contextmenu", (event) => {
     if (!(event.target instanceof HTMLInputElement)) event.preventDefault();

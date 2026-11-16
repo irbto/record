@@ -18,7 +18,7 @@ use std::{
 use record_core::{
     glance::glance,
     screenshot::{
-        CaptureMode, MonitorChoice, copy_file_to_clipboard,
+        CaptureMode, MonitorChoice, copy_file_to_clipboard, edit_saved_image,
         events::{CaptureHub, HubEvent, HubRequest, HubSettings},
         format::{ImageFormat, is_image_file, jpeg, viewable_bytes},
         history::list_history,
@@ -31,11 +31,13 @@ use record_core::{
             write_setting,
         },
     },
+    session::create_session_directory,
     video::{enumerate_monitors, video_timestamp},
 };
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, ipc::Response};
 
 use crate::{
+    editing::{EditState, audio_saved},
     engines::{Control, Report, default_folder, start_sound, start_video, stopping},
     files::{FILE_LIMIT, recent_files, within},
     payload::{
@@ -119,13 +121,22 @@ impl AppState {
         }
     }
 
-    /// Returns the folders whose files the interface may open.
-    fn folders(&self) -> [PathBuf; 3] {
+    /// Returns the folders whose files the interface may open. The flag
+    /// marks the folder whose files may lie one folder deeper.
+    fn folders(&self) -> [(PathBuf, bool); 3] {
         [
-            self.settings.options().directory,
-            default_folder(Mode::Audio),
-            default_folder(Mode::Video),
+            (self.settings.options().directory, false),
+            (default_folder(Mode::Audio), true),
+            (default_folder(Mode::Video), false),
         ]
+    }
+
+    /// Returns the pause switch of the running recording.
+    #[must_use]
+    pub fn pause_switch(&self) -> Option<Arc<AtomicBool>> {
+        lock(&self.running)
+            .as_ref()
+            .map(|(_, control)| Arc::clone(&control.paused))
     }
 
     /// Returns the folder that holds the files of one mode.
@@ -137,7 +148,7 @@ impl AppState {
     }
 
     /// Checks a path from the interface against the listed folders.
-    fn listed(&self, path: &str) -> Result<PathBuf, String> {
+    pub fn listed(&self, path: &str) -> Result<PathBuf, String> {
         within(&self.folders(), Path::new(path))
     }
 
@@ -453,6 +464,59 @@ pub fn capture(
     Ok(())
 }
 
+/// Opens one saved screenshot in the annotation overlay.
+///
+/// The window minimizes first and returns when the overlay closes. The
+/// result arrives as a `shots` event, like a capture.
+#[tauri::command(async)]
+pub fn edit_screenshot(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    path: &str,
+) -> Result<(), String> {
+    let file = state.listed(path)?;
+    if !is_image_file(&file) {
+        return Err(format!("{} is not a screenshot", file_name(&file)));
+    }
+    let monitor = state.settings.options().monitor;
+    let copy = state.settings.copy.load(Ordering::Relaxed);
+    let minimized = window.minimize().is_ok();
+    // The overlay owns a window, so it needs a thread of its own.
+    thread::Builder::new()
+        .name("screenshot-edit".to_owned())
+        .spawn(move || {
+            let _ = app.emit(SHOTS_EVENT, ShotUpdate::Capturing);
+            if minimized {
+                thread::sleep(MINIMIZE_TIME);
+            }
+            let update = match edit_saved_image(&file, monitor, copy) {
+                Ok(Some(summary)) => ShotUpdate::Finished {
+                    file: summary.output.as_deref().map(file_name),
+                    width: summary.width,
+                    height: summary.height,
+                    url: None,
+                    copied: summary.copied,
+                    hdr_nits: None,
+                    error: summary
+                        .clipboard_error
+                        .map(|error| format!("Clipboard failed: {error}")),
+                },
+                Ok(None) => ShotUpdate::Cancelled,
+                Err(error) => ShotUpdate::Failed {
+                    error: format!("{error:#}"),
+                },
+            };
+            if minimized && let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            let _ = app.emit(SHOTS_EVENT, update);
+        })
+        .map(drop)
+        .map_err(|error| format!("could not start the editor: {error}"))
+}
+
 /// Starts or stops auto capture.
 #[tauri::command(async)]
 pub fn toggle_auto(state: State<'_, AppState>) -> Result<(), String> {
@@ -514,28 +578,42 @@ pub fn start_recording(
     if mode == Mode::Screenshot {
         return Err("A screenshot is not a recording".to_owned());
     }
-    let output = default_folder(mode).join(format!(
-        "recording-{}.{}",
-        video_timestamp(),
-        mode.extension()
-    ));
+    let stamp = video_timestamp();
+    let output = if mode == Mode::Audio {
+        // An audio recording is a folder of parts and named clips.
+        create_session_directory(&default_folder(mode), &stamp)
+            .map_err(|error| format!("could not create the session folder: {error}"))?
+    } else {
+        default_folder(mode).join(format!("recording-{stamp}.{}", mode.extension()))
+    };
     let control = Control::default();
     *running = Some((mode, control.clone()));
     drop(running);
     let path = output.display().to_string();
     if mode == Mode::Audio {
+        let (clips, clip_requests) = crossbeam_channel::bounded(8);
+        app.state::<EditState>().begin_audio(clips);
+        let saved = {
+            let app = app.clone();
+            Arc::new(move |file| audio_saved(&app, file))
+        };
         let report: Report<SoundUpdate> = Arc::new(move |update| {
             let ended = matches!(update, SoundUpdate::Stopped { .. });
             if ended {
                 *lock(&app.state::<AppState>().running) = None;
+                app.state::<EditState>().end_audio();
             }
             let _ = app.emit(SOUND_EVENT, update);
             if ended {
                 recording_ended(&app);
             }
         });
-        start_sound(output, &control, report);
+        start_sound(output, &control, clip_requests, saved, report);
     } else {
+        let saved = {
+            let app = app.clone();
+            Arc::new(move |summary: &_| app.state::<EditState>().remember_video(summary))
+        };
         let report: Report<VideoUpdate> = Arc::new(move |update| {
             let ended = matches!(update, VideoUpdate::Stopped { .. });
             if ended {
@@ -551,6 +629,7 @@ pub fn start_recording(
             monitor.unwrap_or(0),
             fps.unwrap_or(DEFAULT_FPS).clamp(1, 240),
             &control,
+            saved,
             report,
         );
     }
@@ -582,7 +661,13 @@ pub fn set_paused(state: State<'_, AppState>, paused: bool) -> bool {
 pub fn files(state: State<'_, AppState>, mode: Mode) -> Vec<FileEntry> {
     let now = SystemTime::now();
     if mode != Mode::Screenshot {
-        return recent_files(&state.folder(mode), mode.extension(), now);
+        // The parts and clips of an audio session lie in their own folder.
+        return recent_files(
+            &state.folder(mode),
+            mode.extension(),
+            mode == Mode::Audio,
+            now,
+        );
     }
     // Screenshots come in several formats.
     list_history(&state.folder(mode))

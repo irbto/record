@@ -5,7 +5,8 @@
 //! the menus and the window buttons. The window shows a web interface from
 //! `ui/dist`. This crate connects that
 //! interface to the engines of `record-core`: [`commands`] holds what the
-//! interface can ask for, [`engines`] runs the recordings, and [`payload`]
+//! interface can ask for, [`engines`] runs the recordings, [`editing`] cuts
+//! clips and edits finished videos, and [`payload`]
 //! defines every value that crosses the boundary.
 //!
 //! One copy of the program runs at a time. It keeps an icon in the tray, so
@@ -13,6 +14,7 @@
 //! the window of the first copy, and `--quit` asks the first copy to exit.
 
 pub mod commands;
+pub mod editing;
 pub mod engines;
 pub mod files;
 pub mod payload;
@@ -25,7 +27,10 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 
-use crate::commands::{AppState, HIDDEN_ARGUMENT, QUIT_ARGUMENT};
+use crate::{
+    commands::{AppState, HIDDEN_ARGUMENT, QUIT_ARGUMENT},
+    editing::EditState,
+};
 
 /// Edge of the tray picture in pixels.
 const TRAY_EDGE: u32 = 32;
@@ -99,6 +104,7 @@ pub fn run() {
                 return Ok(());
             }
             app.manage(AppState::start());
+            app.manage(EditState::default());
             commands::forward_captures(app.handle());
             add_tray(app)?;
             if !has_argument(&arguments, HIDDEN_ARGUMENT) {
@@ -133,6 +139,7 @@ pub fn run() {
             commands::import_uploader,
             commands::capture,
             commands::toggle_auto,
+            commands::edit_screenshot,
             commands::monitors,
             commands::monitor_preview,
             commands::start_recording,
@@ -149,6 +156,16 @@ pub fn run() {
             commands::minimize,
             commands::toggle_maximize,
             commands::is_maximized,
+            editing::save_clip,
+            editing::clip_waveform,
+            editing::play_clip,
+            editing::stop_clip,
+            editing::trim_audio_clip,
+            editing::open_video_editor,
+            editing::close_video_editor,
+            editing::editor_frame,
+            editing::editor_waveform,
+            editing::export_video,
         ])
         .run(tauri::generate_context!())
         .expect("the desktop program could not start");

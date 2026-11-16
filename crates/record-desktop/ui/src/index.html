@@ -87,6 +87,14 @@
       <div class="panel files"><span class="title" id="video-files-title">Recordings</span><div class="body rows scroll" id="video-files"></div></div>
     </section>
 
+    <!-- Video editor. It covers the screen capture screen while a video is open. -->
+    <section class="view" id="editor" aria-label="Video editor">
+      <div class="transport" id="editor-bar"></div>
+      <div class="panel green picture"><span class="title" id="editor-title">Edit</span><div class="body"><canvas id="editor-picture"></canvas><p class="empty" id="editor-empty" hidden></p></div></div>
+      <div class="panel fields"><span class="title">Fades and crop</span><div class="body scroll" id="editor-fields"></div></div>
+      <div class="panel purple timeline"><span class="title" id="editor-range">Range</span><div class="body"><canvas id="editor-timeline"></canvas></div></div>
+    </section>
+
     <!-- Screenshot. -->
     <section class="view" id="screenshot" aria-label="Screenshot">
       <div class="panel purple"><span class="title">Capture</span><div class="body rows" id="capture-menu"></div></div>

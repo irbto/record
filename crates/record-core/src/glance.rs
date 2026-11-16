@@ -40,7 +40,9 @@ pub fn fitted_size(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
 /// Converts packed BGRA pixels to packed RGB pixels.
 #[must_use]
 pub fn rgb_from_bgra(bgra: &[u8]) -> Vec<u8> {
-    bgra.chunks_exact(4)
+    bgra.as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|pixel| [pixel[2], pixel[1], pixel[0]])
         .collect()
 }

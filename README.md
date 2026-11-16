@@ -347,9 +347,9 @@ The status line shows the SDR white level that the conversion used. Use `--sdr-w
 
 The window opens on **Home**. Home has one large button for each mode, the most recent files, and the state of the global hotkeys. Tabs at the top switch between Home, System audio, Screen capture, and Screenshot.
 
-- **System audio** shows the time, two six-second scopes, the spectrum, and the left and right levels. It writes MP3 files to `Music\record`.
-- **Screen capture** selects the monitor and the frame rate. The preview shows the selected monitor live, before and during a recording. It writes MP4 files to `Videos\record`.
-- **Screenshot** has the capture list, the after-capture switches, the upload destination, and the history with a preview. The window minimizes during a capture, so it is never in its own picture.
+- **System audio** shows the time, two six-second scopes, the spectrum, and the left and right levels. Each recording is a session folder in `Music\record`, as in the terminal program. **Clip** names the audio since the last file as a clip, and the recording continues. The list shows each part and clip of the session. Select a clip to trim it: drag the two ends on the waveform, play the range, and save.
+- **Screen capture** selects the monitor and the frame rate. The preview shows the selected monitor live, before and during a recording. It writes MP4 files to `Videos\record`. A finished recording opens in the editor, and so does a recording that you select in the list. Drag the two ends of the range on the timeline, click the timeline to see a frame, and enter fades and crop margins. **Save** writes the edit over the file.
+- **Screenshot** has the capture list, the after-capture switches, the upload destination, and the history with a preview. The window minimizes during a capture, so it is never in its own picture. **Edit** opens the selected screenshot in the annotation overlay again and saves the result over the file. An image larger than the monitor is edited at the size of the monitor.
 
 The window draws its own title bar in place of the Windows frame. Drag it to move the window, and double-click it to maximize. The title bar holds the menus. **File** starts, pauses, and saves a recording and opens Settings. **View** switches screens. **Capture** has every screenshot mode and the upload destination. **Help** lists the keys.
 
@@ -359,6 +359,7 @@ The window draws its own title bar in place of the Windows frame. Drag it to mov
 | `Ctrl+R` | Start recording |
 | `Space` | Start, pause, or resume |
 | `Ctrl+P` | Pause or resume |
+| `Ctrl+K` | Name a clip in an audio recording |
 | `Ctrl+S` | Save and stop |
 | `Ctrl+O` | Open the output folder |
 | `Ctrl+D` | Upload destination |

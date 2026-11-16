@@ -300,3 +300,83 @@ export function standInSample(time: number, ear: number): number {
   const syllable = 0.35 + 0.65 * smooth(time * 7.3 + ear * 11);
   return Math.min(1, gate * syllable * 1.25) * (noise(time * 913.7 + ear) * 2 - 1);
 }
+
+/**
+ * Draws one or more waveforms over the full width with a selected range.
+ * Everything outside the range is dimmed. `play` marks one position.
+ * All positions run from 0 to 1.
+ */
+export function lanes(
+  canvas: HTMLCanvasElement,
+  waves: { bins: readonly (readonly [number, number])[]; color: string }[],
+  start: number,
+  end: number,
+  play: number | null,
+): void {
+  const [g, width, height] = fit(canvas);
+  const band = height / Math.max(1, waves.length);
+  waves.forEach((wave, lane) => {
+    const middle = band * lane + band / 2;
+    const reach = band / 2 - 3;
+    g.fillStyle = wave.color;
+    g.globalAlpha = 0.35;
+    g.fillRect(0, Math.round(middle), width, 1);
+    g.globalAlpha = 1;
+    const count = wave.bins.length;
+    for (let x = 0; x < width && count; x += 2) {
+      const first = Math.floor((x / width) * count);
+      const last = Math.max(first + 1, Math.floor(((x + 2) / width) * count));
+      let low = 0;
+      let high = 0;
+      for (let index = first; index < last && index < count; index++) {
+        low = Math.min(low, wave.bins[index]![0]);
+        high = Math.max(high, wave.bins[index]![1]);
+      }
+      const top = middle - Math.min(1, high) * reach;
+      const bottom = middle - Math.max(-1, low) * reach;
+      g.fillRect(x, top, 1.5, Math.max(1, bottom - top));
+    }
+  });
+  const left = start * width;
+  const right = end * width;
+  g.fillStyle = "rgb(12 12 12 / 0.72)";
+  g.fillRect(0, 0, left, height);
+  g.fillRect(right, 0, width - right, height);
+  g.fillStyle = token("--text");
+  for (const [x, direction] of [[left, 1], [right, -1]] as const) {
+    g.fillRect(Math.round(x) - 1, 0, 2, height);
+    g.fillRect(direction === 1 ? Math.round(x) : Math.round(x) - 7, 0, 7, 12);
+  }
+  if (play !== null) {
+    g.fillStyle = token("--red");
+    g.fillRect(Math.round(play * width), 0, 1, height);
+  }
+}
+
+/** Dims the margins that a crop removes from the picture drawn by `contain`. */
+export function cropShade(
+  canvas: HTMLCanvasElement,
+  pictureWidth: number,
+  pictureHeight: number,
+  crop: { left: number; right: number; top: number; bottom: number },
+): void {
+  if (!pictureWidth || !pictureHeight) return;
+  const box = canvas.getBoundingClientRect();
+  const g = canvas.getContext("2d")!;
+  const scale = Math.min(box.width / pictureWidth, box.height / pictureHeight);
+  const width = pictureWidth * scale;
+  const height = pictureHeight * scale;
+  const x = (box.width - width) / 2;
+  const y = (box.height - height) / 2;
+  const [left, right, top, bottom] = [crop.left * scale, crop.right * scale, crop.top * scale, crop.bottom * scale];
+  g.fillStyle = "rgb(12 12 12 / 0.72)";
+  g.fillRect(x, y, left, height);
+  g.fillRect(x + width - right, y, right, height);
+  g.fillRect(x + left, y, Math.max(0, width - left - right), top);
+  g.fillRect(x + left, y + height - bottom, Math.max(0, width - left - right), bottom);
+  if (left + right + top + bottom > 0) {
+    g.strokeStyle = token("--text");
+    g.lineWidth = 1;
+    g.strokeRect(x + left + 0.5, y + top + 0.5, Math.max(0, width - left - right - 1), Math.max(0, height - top - bottom - 1));
+  }
+}

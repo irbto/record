@@ -58,6 +58,21 @@ export function desktopBridge(): Bridge | null {
     openFile: (path) => invoke("open_file", { path }),
     openFolder: (mode) => invoke("open_folder", { mode }),
     copyPicture: (path) => invoke("copy_picture", { path }),
+    editScreenshot: (path) => invoke("edit_screenshot", { path }),
+    saveClip: (name) => invoke("save_clip", { name }),
+    clipWaveform: (path) => invoke("clip_waveform", { path }),
+    playClip: (path, start, end) => invoke("play_clip", { path, start, end }),
+    stopClip: () => invoke("stop_clip"),
+    trimAudioClip: (path, start, end) => invoke("trim_audio_clip", { path, start, end }),
+    openVideoEditor: (path) => invoke("open_video_editor", { path }),
+    closeVideoEditor: () => invoke("close_video_editor"),
+    async editorFrame(seconds) {
+      const bytes = bytesOf(await invoke<unknown>("editor_frame", { seconds }));
+      if (!bytes || !bytes.byteLength) throw "The picture is empty";
+      return new Blob([bytes], { type: "image/jpeg" });
+    },
+    editorWaveform: () => invoke("editor_waveform"),
+    exportVideo: (edit) => invoke("export_video", { edit }),
     quit: () => invoke("quit"),
     closeWindow: () => invoke("close_window"),
     minimize: () => invoke("minimize"),
