@@ -373,7 +373,7 @@ pub(super) fn video_editor_header_line(
             format_clock(selection_start_time(editor)),
             Style::default().fg(CYAN).bold(),
         ),
-        Span::styled("–", Style::default().fg(MUTED)),
+        Span::styled("\u{2013}", Style::default().fg(MUTED)),
         Span::styled(
             format_clock(selection_end_time(editor)),
             Style::default().fg(GREEN).bold(),
@@ -390,7 +390,7 @@ pub(super) fn video_editor_header_line(
             format_clock(selection_start_time(editor)),
             Style::default().fg(CYAN).bold(),
         ),
-        Span::styled("–", Style::default().fg(MUTED)),
+        Span::styled("\u{2013}", Style::default().fg(MUTED)),
         Span::styled(
             format_clock(selection_end_time(editor)),
             Style::default().fg(GREEN).bold(),
@@ -407,7 +407,7 @@ pub(super) fn video_editor_header_line(
             format_clock(selection_start_time(editor)),
             Style::default().fg(CYAN).bold(),
         ),
-        Span::styled("–", Style::default().fg(MUTED)),
+        Span::styled("\u{2013}", Style::default().fg(MUTED)),
         Span::styled(
             format_clock(selection_end_time(editor)),
             Style::default().fg(GREEN).bold(),
